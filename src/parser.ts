@@ -85,25 +85,55 @@ export async function parseSource(
   const errors: ParseError[] = [];
 
   try {
+    console.log(`🔍 Looking for source folder at: ${source.root}`);
     
     // Get all files in the source directory
     const folder = app.vault.getAbstractFileByPath(source.root);
+    console.log(`🔍 Folder object:`, folder);
+    console.log(`🔍 Folder type:`, folder ? typeof folder : 'null');
+    console.log(`🔍 Has children:`, folder && "children" in folder);
+    
     if (!folder || !("children" in folder)) {
       console.error(`❌ Source folder not found: ${source.root}`);
+      console.error(`❌ Available files in vault:`, app.vault.getRoot().children?.map(c => c.path));
       throw new Error(`Source folder not found: ${source.root}`);
     }
 
     console.log(`📁 Found folder with ${folder.children.length} files:`);
-    folder.children.forEach(child => {
-      console.log(`  - ${child.name} (${child instanceof TFile ? 'file' : 'folder'})`);
+    folder.children.forEach((child, index) => {
+      console.log(`  ${index + 1}. ${child.name} (${child instanceof TFile ? 'file' : 'folder'})`);
+      if (child instanceof TFile) {
+        console.log(`     Size: ${child.stat.size} bytes`);
+        console.log(`     Path: ${child.path}`);
+      }
     });
 
-    // Look for conversation files
+    // Look for conversation files - only JSON files, exclude HTML
     const conversationFiles = folder.children.filter(
-      file => file.name === "conversations.json" || file.name === "shared_conversations.json"
+      file => file instanceof TFile && 
+        file.name.endsWith(".json") && 
+        !file.name.endsWith(".html") &&
+        (
+          file.name === "conversations.json" || 
+          file.name === "shared_conversations.json" ||
+          file.name.includes("conversation") ||
+          file.name.includes("chat")
+        )
     );
     
-    console.log(`📄 Found ${conversationFiles.length} conversation files:`, conversationFiles.map(f => f.name));
+    console.log(`📄 Found ${conversationFiles.length} potential conversation files:`, conversationFiles.map(f => f.name));
+    
+    // If no conversation files found, try all JSON files (excluding HTML)
+    if (conversationFiles.length === 0) {
+      console.log("⚠️ No conversation files found, trying all JSON files...");
+      const allJsonFiles = folder.children.filter(
+        file => file instanceof TFile && 
+          file.name.endsWith(".json") && 
+          !file.name.endsWith(".html")
+      );
+      console.log(`📄 Found ${allJsonFiles.length} JSON files:`, allJsonFiles.map(f => f.name));
+      conversationFiles.push(...allJsonFiles);
+    }
 
     for (let i = 0; i < conversationFiles.length; i++) {
       const file = conversationFiles[i];
@@ -116,6 +146,15 @@ export async function parseSource(
         const data = JSON.parse(content);
         console.log(`📊 Parsed JSON, type: ${Array.isArray(data) ? 'array' : typeof data}, length: ${Array.isArray(data) ? data.length : 'N/A'}`);
         
+        // Debug: Show structure of the data
+        if (Array.isArray(data) && data.length > 0) {
+          console.log(`🔍 First item structure:`, Object.keys(data[0]));
+          console.log(`🔍 First item sample:`, JSON.stringify(data[0], null, 2).substring(0, 500) + '...');
+        } else if (typeof data === 'object' && data !== null) {
+          console.log(`🔍 Object structure:`, Object.keys(data));
+          console.log(`🔍 Object sample:`, JSON.stringify(data, null, 2).substring(0, 500) + '...');
+        }
+        
         if (Array.isArray(data)) {
           console.log(`🔄 Processing ${data.length} conversations...`);
           for (let j = 0; j < data.length; j++) {
@@ -125,17 +164,24 @@ export async function parseSource(
             console.log(`  - Conversation "${conv.title || 'untitled'}" -> ${convMessages.length} messages`);
             messages.push(...convMessages);
           }
+        } else if (typeof data === 'object' && data !== null) {
+          // Handle single conversation object
+          console.log(`🔄 Processing single conversation object: "${data.title || 'untitled'}"`);
+          const convMessages = flattenConversation(data, source, file.name as any);
+          console.log(`  - Conversation "${data.title || 'untitled'}" -> ${convMessages.length} messages`);
+          messages.push(...convMessages);
         } else {
-          console.warn(`⚠️ Expected array but got ${typeof data}`);
+          console.warn(`⚠️ Expected array or object but got ${typeof data}`);
         }
         console.log(`📖 Completed file ${i + 1}/${conversationFiles.length}`);
-      } catch (error) {
+      } catch (error: any) {
         console.error(`❌ Error reading file ${file.path}:`, error);
         console.error(`❌ Error details:`, {
           message: error.message,
           stack: error.stack,
           name: error.name
         });
+        console.error(`❌ Full error object:`, error);
         errors.push({
           source: file.path,
           error: String(error),

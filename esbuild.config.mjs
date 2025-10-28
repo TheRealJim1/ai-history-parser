@@ -16,11 +16,24 @@ const options = {
   platform: 'browser',
   define: {
     'process.env.NODE_ENV': '"production"',
+    'global': 'globalThis',
   },
   // Handle SQL.js dependencies
   resolveExtensions: ['.tsx', '.ts', '.js', '.jsx'],
-  // Use external instead of alias for Node.js modules
-  external: ['obsidian'],
+  // External modules that SQL.js tries to use
+  external: ['obsidian', 'fs', 'path', 'crypto'],
+  // Polyfills for Node.js modules
+  banner: {
+    js: `
+      // Polyfills for SQL.js
+      if (typeof global === 'undefined') {
+        var global = globalThis;
+      }
+      if (typeof process === 'undefined') {
+        var process = { env: {} };
+      }
+    `,
+  },
 };
 
 const isWatch = process.argv.includes('--watch');

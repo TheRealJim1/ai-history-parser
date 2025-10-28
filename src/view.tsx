@@ -2,12 +2,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { parseMultipleSources, searchMessages, highlightText } from "./parser";
-import { openDb, upsertBatch, saveDbToVault, loadDbFromVault, getStats } from "./db";
 import { detectVendor, generateSourceId, pickColor } from "./settings";
 import { MessageContent } from "./components/ToolBlock";
 import { HeaderProgress } from "./components/HeaderProgress";
 import { Paginator } from "./components/Paginator";
 import { usePagination } from "./hooks/usePagination";
+import { useMessages, useDatabaseStats, useSearchMessages, useImportSources, useDatabaseInit } from "./hooks/useDatabase";
+import { QueryProvider } from "./providers/QueryProvider";
 import { rankedMessageSearch, getSearchStats } from "./lib/score";
 import { enableColumnResizers } from "./resize";
 import { statusBus } from "./statusBus";
@@ -34,7 +35,11 @@ export class ParserView extends ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("aihp-root");
     this.root = ReactDOM.createRoot(this.contentEl);
-    this.root.render(<UI plugin={this.plugin} />);
+    this.root.render(
+      <QueryProvider app={this.plugin.app}>
+        <UI plugin={this.plugin} />
+      </QueryProvider>
+    );
   }
 
   async onClose() {
@@ -182,7 +187,7 @@ function HealthCheckPanel({ checks }: { checks: HealthCheck[] }) {
   );
 }
 
-// Main UI Component
+// Main UI Component with SQLite + TanStack Query
 function UI({ plugin }: { plugin: AIHistoryParser }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [pinHeader, setPinHeader] = useState<boolean>(() => {
@@ -192,9 +197,6 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
   const [activeSources, setActiveSources] = useState<Set<string>>(
     new Set(plugin.settings.lastActiveSourceIds)
   );
-  const [status, setStatus] = useState<"idle"|"loading"|"ready"|"error">("idle");
-  const [error, setError] = useState<string>("");
-  const [messages, setMessages] = useState<FlatMessage[]>([]);
   const [searchQuery, setSearchQuery] = useState(plugin.settings.lastQuery || "");
   const [facets, setFacets] = useState<SearchFacets>({
     vendor: 'all',
@@ -202,17 +204,35 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     titleBody: true,
     regex: false
   });
+  const [selectedMessage, setSelectedMessage] = useState<FlatMessage | null>(null);
+  const [debugMode, setDebugMode] = useState(false);
+
+  // Initialize database
+  const dbInit = useDatabaseInit(plugin.app);
+  
+  // Fallback to original parsing for now - TanStack Query will be added later
+  const [messages, setMessages] = useState<FlatMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+  
+  // Database stats (will be implemented later)
+  const dbStats = { totalMessages: 0, totalConversations: 0, sources: 0, lastUpdated: 0 };
+  const statsLoading = false;
+
+  // Mutations
+  const importSources = useImportSources(plugin.app);
+  const [isImporting, setIsImporting] = useState(false);
+  
+  // Legacy state for compatibility (will be replaced by TanStack Query)
+  const [status, setStatus] = useState<"idle"|"loading"|"ready"|"error">("idle");
+  const [error, setError] = useState<string>("");
   const [searchProgress, setSearchProgress] = useState<SearchProgress>({
     isSearching: false,
     progress: 0,
     total: 0,
     current: 0
   });
-  const [selectedMessage, setSelectedMessage] = useState<FlatMessage | null>(null);
-  const [isImporting, setIsImporting] = useState(false);
-  const [dbStats, setDbStats] = useState<any>(null);
-  const [isSearching, setIsSearching] = useState(false);
-  const [debugMode, setDebugMode] = useState(false);
 
   // Debounce search query
   const debouncedQuery = useDebounce(searchQuery, 300);
@@ -231,7 +251,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     });
   }, [debouncedQuery, facets, activeSources]);
 
-  // Filtered messages based on search and facets with ranking
+  // Filter messages based on search and facets with ranking
   const filteredMessages = useMemo(() => {
     if (!messages.length) return [];
     
@@ -350,6 +370,8 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
 
     setStatus("loading");
     setError("");
+    setMessagesLoading(true);
+    setMessagesError(null);
 
     console.log("📊 Starting status bus task...");
     const task = statusBus.begin({ 
@@ -415,7 +437,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
           
           console.log(`✅ Finished processing ${processed} messages from ${source.id}`);
           allErrors.push(...result.errors);
-        } catch (sourceError) {
+        } catch (sourceError: any) {
           console.error(`❌ Error processing source ${source.id}:`, sourceError);
           console.error(`❌ Source error details:`, {
             message: sourceError.message,
@@ -447,6 +469,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
       setMessages(allMessages);
       console.log("🔄 Setting status to ready...");
       setStatus("ready");
+      setMessagesLoading(false);
       console.log("📊 Ending status bus task...");
       task.end();
       console.log("📊 Status bus task ended");
@@ -461,6 +484,8 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
       });
       setStatus("error");
       setError(String(e?.message ?? e));
+      setMessagesLoading(false);
+      setMessagesError(String(e?.message ?? e));
       task.fail(e?.message);
       console.error("❌ ===== LOADMESSAGES FAILED =====");
     }
@@ -528,29 +553,44 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     await plugin.saveSetting('lastActiveSourceIds', Array.from(next));
   }, [activeSources, plugin]);
 
-  // Import to SQLite
+  // Import to SQLite (restored functionality)
   const importToDb = useCallback(async () => {
+    if (!messages.length) {
+      setError("No messages to import. Please load messages first.");
+      return;
+    }
+
     setIsImporting(true);
     
     try {
+      console.log("🗄️ Starting SQLite import...");
+      
+      // Import the old database functions temporarily
+      const { openDb, upsertBatch, saveDbToVault } = await import("./db");
+      
       await openDb();
-      upsertBatch(filteredMessages.length > 0 ? filteredMessages : messages);
+      upsertBatch(messages);
       await saveDbToVault(plugin);
       
       // Update stats
+      const { getStats } = await import("./db");
       const stats = getStats();
       setDbStats(stats);
+      
+      console.log("✅ SQLite import completed");
+      setError("");
     } catch (error) {
-      console.error("Import failed:", error);
+      console.error("❌ Import failed:", error);
       setError(`Import failed: ${error}`);
     } finally {
       setIsImporting(false);
     }
-  }, [plugin, filteredMessages, messages]);
+  }, [messages, plugin]);
 
-  // Load database stats
+  // Load database stats (restored functionality)
   const loadDbStats = useCallback(async () => {
     try {
+      const { loadDbFromVault, openDb, getStats } = await import("./db");
       const dbData = await loadDbFromVault(plugin);
       if (dbData) {
         await openDb(dbData);
@@ -784,7 +824,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
           </div>
           
           <div className="aip-messages">
-            {status === "loading" ? (
+            {messagesLoading ? (
               <div>
                 <div className="aip-skeleton skel-row" />
                 <div className="aip-skeleton skel-row" />
@@ -879,7 +919,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
               <div>Showing: {pagedConvMessages.length.toLocaleString()}</div>
               <div>Page: {msgPage} / {msgPageCount}</div>
               <div>Active Sources: {activeSources.size}</div>
-              {dbStats && (
+              {!statsLoading && (
                 <>
                   <div>In Database: {dbStats.totalMessages.toLocaleString()}</div>
                   <div>Conversations: {dbStats.totalConversations.toLocaleString()}</div>
@@ -890,7 +930,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
             <h4>Vendor Breakdown</h4>
             <div className="aip-vendor-stats">
               {Object.entries(
-                filteredMessages.reduce((acc, msg) => {
+                filteredMessages.reduce((acc: Record<string, number>, msg: any) => {
                   acc[msg.vendor] = (acc[msg.vendor] || 0) + 1;
                   return acc;
                 }, {} as Record<string, number>)
