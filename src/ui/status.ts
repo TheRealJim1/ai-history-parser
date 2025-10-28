@@ -10,6 +10,7 @@ export type StatusSnapshot = {
   error?: string;
   startedAt?: number;
   etaSec?: number;
+  cancelled?: boolean;
 };
 
 class StatusBus {
@@ -33,11 +34,12 @@ class StatusBus {
 
   begin(id: string, label: string, total?: number) {
     const startedAt = Date.now();
-    const snapshot: StatusSnapshot = { id, label, total, done: 0, active: true, startedAt };
+    const snapshot: StatusSnapshot = { id, label, total, done: 0, active: true, startedAt, cancelled: false };
     this.emit(snapshot);
 
     return {
       tick: (delta=1, sublabel?: string) => {
+        if (this.s?.cancelled) return;
         const done = Math.max(0, (this.s?.done ?? 0) + delta);
         const totalNow = this.s?.total;
         let etaSec: number | undefined;
@@ -51,6 +53,7 @@ class StatusBus {
       },
       
       set: (done: number, sublabel?: string) => {
+        if (this.s?.cancelled) return;
         let etaSec: number | undefined;
         if (this.s?.total && done > 0) {
           const rate = (Date.now() - startedAt) / done;
@@ -65,6 +68,14 @@ class StatusBus {
       
       label: (label: string, sublabel?: string) => {
         this.emit({ ...(this.s as StatusSnapshot), label, sublabel, active: true });
+      },
+      
+      cancel: () => {
+        this.emit({ ...(this.s as StatusSnapshot), cancelled: true, active: false });
+      },
+      
+      isCancelled: () => {
+        return this.s?.cancelled ?? false;
       },
       
       end: () => {

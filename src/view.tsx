@@ -201,22 +201,16 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
   const [selectedMessage, setSelectedMessage] = useState<FlatMessage | null>(null);
   const [debugMode, setDebugMode] = useState(false);
 
-  // Initialize database
-  const dbInit = useDatabaseInit(plugin.app);
-  
-  // Fallback to original parsing for now - TanStack Query will be added later
+  // Local state for messages and database
   const [messages, setMessages] = useState<FlatMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
-  
-  // Database stats (will be implemented later)
-  const dbStats = { totalMessages: 0, totalConversations: 0, sources: 0, lastUpdated: 0 };
-  const statsLoading = false;
-
-  // Mutations
-  const importSources = useImportSources(plugin.app);
   const [isImporting, setIsImporting] = useState(false);
+  
+  // Database stats
+  const [dbStats, setDbStats] = useState({ totalMessages: 0, totalConversations: 0, sources: 0, lastUpdated: 0 });
+  const [statsLoading, setStatsLoading] = useState(false);
   
   // Legacy state for compatibility (will be replaced by TanStack Query)
   const [status, setStatus] = useState<"idle"|"loading"|"ready"|"error">("idle");
@@ -368,12 +362,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     setMessagesError(null);
 
     console.log("📊 Starting status bus task...");
-    const task = statusBus.begin({ 
-      id: "index", 
-      label: "Indexing exports", 
-      total: activeSourcesArray.length, 
-      canCancel: true 
-    });
+    const task = statusBus.begin("index", "Indexing exports", activeSourcesArray.length);
     console.log("📊 Status bus task created:", task);
 
     try {
@@ -391,11 +380,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
         console.log(`📁 ===== PROCESSING SOURCE ${completed + 1}/${activeSourcesArray.length} =====`);
         console.log(`📁 Processing source: ${source.id} (${source.root})`);
         console.log("📊 Setting task sublabel...");
-        task.setSub(source.root.split(/[\\/]/).slice(-2).join("/"));
-        
-        // Start indeterminate while discovering files
-        console.log("📊 Setting task indeterminate...");
-        task.indeterminate(true);
+        task.tick(0, source.root.split(/[\\/]/).slice(-2).join("/"));
         
         try {
           console.log("🔄 Calling parseMultipleSources...");
@@ -403,7 +388,6 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
           console.log(`✅ Parsed ${result.messages.length} messages from ${source.id}`);
           console.log(`✅ Parse errors: ${result.errors.length}`);
           
-          task.indeterminate(false);
           task.setTotal(result.messages.length);
           
           let processed = 0;
@@ -424,7 +408,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
             processed++;
             if (processed % 50 === 0) {
               console.log(`🔄 Processed ${processed}/${result.messages.length} messages`);
-              task.stepTo(processed);
+              task.set(processed);
               await new Promise(r => setTimeout(r, 0)); // Yield to UI
             }
           }
@@ -447,7 +431,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
         
         completed++;
         console.log(`📁 Completed source ${completed}/${activeSourcesArray.length}`);
-        task.tick(0); // Keep speed/ETA in sync
+        task.tick(1); // Increment progress
       }
 
       console.log(`📊 ===== LOADMESSAGES COMPLETION =====`);
@@ -480,7 +464,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
       setError(String(e?.message ?? e));
       setMessagesLoading(false);
       setMessagesError(String(e?.message ?? e));
-      task.fail(e?.message);
+      task.fail(e?.message ?? String(e));
       console.error("❌ ===== LOADMESSAGES FAILED =====");
     }
   }, [plugin, activeSources]);
@@ -1008,12 +992,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
                 onClick={() => {
                   console.log("🧪 Test Status button clicked!");
                   console.log("🧪 Testing status bar...");
-                  const task = statusBus.begin({
-                    id: "test",
-                    label: "Testing Status Bar",
-                    total: 10,
-                    canCancel: true
-                  });
+                  const task = statusBus.begin("test", "Testing Status Bar", 10);
                   
                   let i = 0;
                   const interval = setInterval(() => {
@@ -1077,12 +1056,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
                 onClick={() => {
                   console.log("🧪 Test Header button clicked!");
                   console.log("🧪 Testing HeaderProgress...");
-                  const task = statusBus.begin({
-                    id: "header-test",
-                    label: "Testing Header Progress",
-                    total: 5,
-                    canCancel: true
-                  });
+                  const task = statusBus.begin("header-test", "Testing Header Progress", 5);
                   
                   let i = 0;
                   const interval = setInterval(() => {
