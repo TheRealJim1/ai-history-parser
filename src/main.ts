@@ -2,13 +2,14 @@
 import { Plugin, WorkspaceLeaf, PluginSettingTab, Setting, Notice, TFile } from "obsidian";
 import { DEFAULT_SETTINGS, validateFolderPath, sanitizeFolderPath, migrateLegacySettings } from "./settings";
 import { ParserView, VIEW_TYPE } from "./view";
-import { attachStatusBar } from "./obsidianStatus";
+import { statusBus } from "./ui/status";
 import type { ParserSettings } from "./types";
 import { GraphEmitter, type ProjectBucket, type Conversation as GraphConversation } from "./graphEmitter";
 import { getMessages } from "./db";
 
 export default class AIHistoryParser extends Plugin {
   settings: ParserSettings;
+  private statusItem?: HTMLElement;
 
   async onload() {
     // Load and migrate settings
@@ -16,7 +17,17 @@ export default class AIHistoryParser extends Plugin {
     this.settings = migrateLegacySettings(loadedData);
 
     // Attach status bar
-    attachStatusBar(this);
+    try {
+      const el = this.addStatusBarItem();
+      this.statusItem = el;
+      el.setText("AI Parser: idle");
+      statusBus.subscribe(s => {
+        if (!this.statusItem) return;
+        if (!s) { this.statusItem.setText("AI Parser: idle"); return; }
+        const pct = s.total ? Math.round(((s.done ?? 0) / s.total) * 100) : undefined;
+        this.statusItem.setText(`AI Parser: ${s.label}${pct!=null?` ${pct}%`:""}`);
+      });
+    } catch { /* if status bar plugin is disabled, no problem */ }
 
     this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ParserView(leaf, this));
 

@@ -4,14 +4,12 @@ import ReactDOM from "react-dom/client";
 import { parseMultipleSources, searchMessages, highlightText } from "./parser";
 import { detectVendor, generateSourceId, pickColor } from "./settings";
 import { MessageContent } from "./components/ToolBlock";
-import { HeaderProgress } from "./components/HeaderProgress";
+import { HeaderProgress } from "./ui/HeaderProgress";
 import { Paginator } from "./components/Paginator";
 import { usePagination } from "./hooks/usePagination";
-import { useMessages, useDatabaseStats, useSearchMessages, useImportSources, useDatabaseInit } from "./hooks/useDatabase";
-import { QueryProvider } from "./providers/QueryProvider";
 import { rankedMessageSearch, getSearchStats } from "./lib/score";
 import { enableColumnResizers } from "./resize";
-import { statusBus } from "./statusBus";
+import { statusBus } from "./ui/status";
 import GraphControls from "./ui/GraphControls";
 import type { FlatMessage, Source, Vendor, SearchFacets, SearchProgress, ParseError } from "./types";
 import type AIHistoryParser from "./main";
@@ -35,11 +33,7 @@ export class ParserView extends ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("aihp-root");
     this.root = ReactDOM.createRoot(this.contentEl);
-    this.root.render(
-      <QueryProvider app={this.plugin.app}>
-        <UI plugin={this.plugin} />
-      </QueryProvider>
-    );
+    this.root.render(<UI plugin={this.plugin} />);
   }
 
   async onClose() {
