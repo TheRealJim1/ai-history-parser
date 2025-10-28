@@ -1,0 +1,13 @@
+
+import esbuild from 'esbuild';
+
+esbuild.build({
+  entryPoints: ['src/main.ts'],
+  bundle: true,
+  outfile: 'main.js',
+  sourcemap: true,
+  format: 'cjs',
+  target: ['chrome109', 'safari15'],
+  external: ['obsidian'],
+  logLevel: 'info',
+}).catch(() => process.exit(1));

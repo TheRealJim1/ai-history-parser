@@ -1,0 +1,11 @@
+
+{
+  "id": "ai-history-parser",
+  "name": "AI History Parser",
+  "version": "0.4.0",
+  "minAppVersion": "1.5.0",
+  "description": "Parse, index, and export multi-source AI conversation exports to a local SQLite file with a pro SPA UI.",
+  "author": "AI History Parser Team",
+  "authorUrl": "https://example.com/ai-history-parser",
+  "isDesktopOnly": true
+}
