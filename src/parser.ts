@@ -233,9 +233,9 @@ function flattenConversation(
   if (Array.isArray(conv.messages)) {
     messageList = conv.messages;
     console.log(`  - Using messages array: ${messageList.length} messages`);
-  } else if (conv.mapping && typeof conv.mapping === "object") {
+  } else if (conv.mapping && typeof conv.mapping === "object" && Object.keys(conv.mapping).length > 0) {
     // Handle mapping-based format (older ChatGPT exports)
-    console.log(`  - Using mapping format`);
+    console.log(`  - Using mapping format with ${Object.keys(conv.mapping).length} nodes`);
     for (const node of Object.values<any>(conv.mapping)) {
       const m = node?.message;
       if (m) messageList.push(m);
@@ -245,7 +245,9 @@ function flattenConversation(
   } else {
     console.warn(`  - No messages or mapping found in conversation`);
     console.warn(`  - Conversation object keys:`, Object.keys(conv));
-    console.warn(`  - Conversation object sample:`, JSON.stringify(conv, null, 2).substring(0, 300) + '...');
+    console.warn(`  - Has mapping:`, !!conv.mapping, typeof conv.mapping);
+    console.warn(`  - Mapping keys:`, conv.mapping ? Object.keys(conv.mapping) : 'none');
+    console.warn(`  - Conversation object sample:`, JSON.stringify(conv, null, 2).substring(0, 500) + '...');
   }
 
   // Extract participants for stable conversation ID
