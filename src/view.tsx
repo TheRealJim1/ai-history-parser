@@ -282,31 +282,77 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
 
   // Group ALL filtered messages by conversation for the left list
   const groupedByConversation = useMemo(() => {
-    const groups = new Map<string, { key: string; title: string; vendor: string; count: number }>();
+    const groups = new Map<string, { key: string; title: string; vendor: string; count: number; lastMessage: FlatMessage }>();
     for (const msg of filteredMessages) {
       const key = `${msg.vendor}:${msg.conversationId}`;
-      if (!groups.has(key)) groups.set(key, { key, title: msg.title || "(untitled)", vendor: msg.vendor, count: 0 });
-      groups.get(key)!.count++;
+      if (!groups.has(key)) {
+        groups.set(key, { key, title: msg.title || "(untitled)", vendor: msg.vendor, count: 0, lastMessage: msg });
+      }
+      const group = groups.get(key)!;
+      group.count++;
+      // Keep the most recent message for sorting
+      if (msg.createdAt > group.lastMessage.createdAt) {
+        group.lastMessage = msg;
+      }
     }
-    // Stable order: newest message title first by occurrence in filteredMessages
-    return Array.from(groups.values());
+    // Sort by last message timestamp (newest first)
+    return Array.from(groups.values()).sort((a, b) => b.lastMessage.createdAt - a.lastMessage.createdAt);
   }, [filteredMessages]);
 
-  // Selected conversation
-  const [selectedConvKey, setSelectedConvKey] = useState<string | null>(null);
-  useEffect(() => {
-    if (!selectedConvKey && groupedByConversation.length > 0) {
-      setSelectedConvKey(groupedByConversation[0].key);
-    }
-  }, [groupedByConversation, selectedConvKey]);
+  // Selected conversations (multi-select)
+  const [selectedConvKeys, setSelectedConvKeys] = useState<Set<string>>(new Set());
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  
+  // Pagination for conversation list
+  const {
+    page: convPage,
+    setPage: setConvPage,
+    pageCount: convPageCount,
+    pageSize: convPageSize,
+    setPageSize: setConvPageSize,
+    total: convTotal,
+    paged: pagedConversations,
+    gotoFirst: convFirst, 
+    gotoLast: convLast, 
+    next: convNext, 
+    prev: convPrev
+  } = usePagination(groupedByConversation, {
+    defaultPageSize: 50,
+    persistKey: "aip.convPageSize",
+    currentFilterHash: filterHash
+  });
 
-  // Messages for the selected conversation
+  // Auto-select first conversation if none selected
+  useEffect(() => {
+    if (selectedConvKeys.size === 0 && pagedConversations.length > 0) {
+      setSelectedConvKeys(new Set([pagedConversations[0].key]));
+    }
+  }, [pagedConversations, selectedConvKeys]);
+
+  // Handle conversation selection
+  const handleConvClick = (convKey: string, ctrlKey: boolean) => {
+    if (multiSelectMode || ctrlKey) {
+      setSelectedConvKeys(prev => {
+        const newSet = new Set(prev);
+        if (newSet.has(convKey)) {
+          newSet.delete(convKey);
+        } else {
+          newSet.add(convKey);
+        }
+        return newSet;
+      });
+    } else {
+      setSelectedConvKeys(new Set([convKey]));
+    }
+  };
+
+  // Messages for the selected conversations
   const selectedConvMessages = useMemo(() => {
-    if (!selectedConvKey) return [] as FlatMessage[];
+    if (selectedConvKeys.size === 0) return [] as FlatMessage[];
     return filteredMessages
-      .filter(m => `${m.vendor}:${m.conversationId}` === selectedConvKey)
+      .filter(m => selectedConvKeys.has(`${m.vendor}:${m.conversationId}`))
       .sort((a,b) => a.createdAt - b.createdAt);
-  }, [filteredMessages, selectedConvKey]);
+  }, [filteredMessages, selectedConvKeys]);
 
   // Pagination for the selected conversation messages (middle pane)
   const {
@@ -321,7 +367,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
   } = usePagination(selectedConvMessages, {
     defaultPageSize: 100,
     persistKey: "aip.pageSize",
-    currentFilterHash: `${filterHash}|conv=${selectedConvKey ?? ""}`
+    currentFilterHash: `${filterHash}|conv=${Array.from(selectedConvKeys).sort().join(',')}`
   });
 
   // Load messages from active sources with comprehensive error handling
@@ -780,17 +826,37 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
         {/* Left Pane: Conversation List */}
         <section className="aip-pane aip-left">
           <div className="aip-pane-header">
-            {status === "loading" && <span>Loading…</span>}
-            {status === "ready" && (
-              <span>
-                {groupedByConversation.length.toLocaleString()} conversations
-                {dbStats && ` • ${dbStats.totalMessages} msgs in DB`}
-              </span>
-            )}
-            {status === "error" && <span className="aihp-err">{error}</span>}
-            {searchProgress.isSearching && (
-              <span>Searching... {searchProgress.current}/{searchProgress.total}</span>
-            )}
+            <div className="aip-pane-header-top">
+              {status === "loading" && <span>Loading…</span>}
+              {status === "ready" && (
+                <span>
+                  {groupedByConversation.length.toLocaleString()} conversations
+                  {dbStats && ` • ${dbStats.totalMessages} msgs in DB`}
+                </span>
+              )}
+              {status === "error" && <span className="aihp-err">{error}</span>}
+              {searchProgress.isSearching && (
+                <span>Searching... {searchProgress.current}/{searchProgress.total}</span>
+              )}
+            </div>
+            <div className="aip-pane-header-controls">
+              <label className="aip-toggle">
+                <input
+                  type="checkbox"
+                  checked={multiSelectMode}
+                  onChange={(e) => setMultiSelectMode(e.target.checked)}
+                />
+                <span>Multi-select</span>
+              </label>
+              {selectedConvKeys.size > 0 && (
+                <button 
+                  className="aihp-btn-small"
+                  onClick={() => setSelectedConvKeys(new Set())}
+                >
+                  Clear ({selectedConvKeys.size})
+                </button>
+              )}
+            </div>
           </div>
           
           <div className="aip-messages">
@@ -804,21 +870,56 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
                 <div className="aip-skeleton skel-row" />
               </div>
             ) : (
-              groupedByConversation.map(g => (
+              pagedConversations.map(g => (
                 <div
                   key={g.key}
-                  className={`aihp-conversation ${selectedConvKey === g.key ? 'selected' : ''}`}
-                  onClick={() => setSelectedConvKey(g.key)}
+                  className={`aihp-conversation ${selectedConvKeys.has(g.key) ? 'selected' : ''}`}
+                  onClick={(e) => handleConvClick(g.key, e.ctrlKey || e.metaKey)}
                   style={{ cursor: 'pointer' }}
                 >
-                  <div className="aihp-conv-header">
-                    <span className="aihp-conv-title">{g.title || "(untitled)"}</span>
-                    <span className="aihp-conv-meta">{g.vendor} • {g.count} msgs</span>
+                  <div className="aihp-conv-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selectedConvKeys.has(g.key)}
+                      onChange={() => handleConvClick(g.key, false)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </div>
+                  <div className="aihp-conv-content">
+                    <div className="aihp-conv-header">
+                      <span className="aihp-conv-title">{g.title || "(untitled)"}</span>
+                      <span className={`aihp-conv-vendor aihp-vendor-${g.vendor}`}>
+                        {g.vendor.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="aihp-conv-meta">
+                      <span className="aihp-conv-count">{g.count} msgs</span>
+                      <span className="aihp-conv-date">
+                        {new Date(g.lastMessage.createdAt).toLocaleDateString()}
+                      </span>
+                    </div>
                   </div>
                 </div>
               ))
             )}
           </div>
+
+          {/* Conversation List Pagination */}
+          {pagedConversations.length > 0 && (
+            <div className="aip-pagination">
+              <Paginator
+                page={convPage}
+                pageCount={convPageCount}
+                pageSize={convPageSize}
+                setPageSize={setConvPageSize}
+                total={convTotal}
+                gotoFirst={convFirst}
+                gotoLast={convLast}
+                next={convNext}
+                prev={convPrev}
+              />
+            </div>
+          )}
         </section>
 
         {/* Center Pane: Selected Conversation Messages + Pagination */}
@@ -841,8 +942,18 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
           {selectedConvMessages.length > 0 && (
             <div className="aihp-message-detail">
               <div className="aihp-detail-header">
-                <h3>{selectedConvMessages[0].title || "(untitled)"}</h3>
-                <div className="aihp-detail-meta">{new Date(selectedConvMessages[0].createdAt).toLocaleString()}</div>
+                <h3>
+                  {selectedConvKeys.size === 1 
+                    ? (selectedConvMessages[0].title || "(untitled)")
+                    : `${selectedConvKeys.size} conversations selected`
+                  }
+                </h3>
+                <div className="aihp-detail-meta">
+                  {selectedConvKeys.size === 1 
+                    ? new Date(selectedConvMessages[0].createdAt).toLocaleString()
+                    : `${selectedConvMessages.length} messages from ${selectedConvKeys.size} conversations`
+                  }
+                </div>
               </div>
 
               {pagedConvMessages.map(msg => (

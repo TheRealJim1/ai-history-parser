@@ -57,6 +57,8 @@ class StatusBus {
         this.emit({ ...s, done, sublabel, etaSec, active:true });
       },
       label:(l:string, sub?:string)=> this.emit({ ...(this.s as StatusSnapshot), label:l, sublabel:sub }),
+      isCancelled:()=> false, // Add missing method
+      cancel:()=> this.emit({ ...(this.s as StatusSnapshot), active:false }), // Add missing method
       end:()=>{
         this.emit({ ...(this.s as StatusSnapshot), active:false });
         if (this.timer) clearTimeout(this.timer);
