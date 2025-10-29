@@ -4,7 +4,9 @@ import type { ConversationLite, ExportIndex, MessageLite, ParseError, FlatMessag
 import { stableConvId, stableMsgId } from "./lib/ids";
 import { extractText, toEpoch, canon, normText } from "./lib/hash";
 import { toSearchDoc, rankedMessageSearch } from "./lib/score";
-import { extractMessagesFromConversation } from "./lib/normalize";
+import { extractChatGPTConversation } from "./lib/chatgptParse";
+import { groupTurns } from "./lib/grouping";
+import { buildConvIndex } from "./lib/convIndex";
 
 // Parse multiple sources and return flattened messages
 export async function parseMultipleSources(
@@ -71,6 +73,29 @@ export async function parseMultipleSources(
 
   console.log(`📊 ===== PARSEMULTIPLESOURCES COMPLETION =====`);
   console.log(`📊 Total: ${allMessages.length} messages, ${allErrors.length} errors`);
+  
+  // Diagnostic: Show role distribution
+  const roleCounts = allMessages.reduce((acc, msg) => {
+    acc[msg.role] = (acc[msg.role] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  console.log(`📊 Role distribution:`, roleCounts);
+  
+  // Diagnostic: Show conversation counts
+  const convCounts = allMessages.reduce((acc, msg) => {
+    acc[msg.conversationId] = (acc[msg.conversationId] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  console.log(`📊 Conversations: ${Object.keys(convCounts).length} unique conversations`);
+  
+  // Diagnostic: Show sample conversation
+  if (allMessages.length > 0) {
+    const sampleConv = allMessages[0].conversationId;
+    const sampleMsgs = allMessages.filter(m => m.conversationId === sampleConv).slice(0, 3);
+    console.log(`📊 Sample conversation "${sampleMsgs[0]?.title}":`, 
+      sampleMsgs.map(m => [m.role, new Date(m.createdAt).toLocaleString(), m.text.slice(0, 60)]));
+  }
+  
   console.log(`📊 ===== PARSEMULTIPLESOURCES END =====`);
   return { messages: allMessages, errors: allErrors };
 }
@@ -168,12 +193,19 @@ export async function parseSource(
             const conv = data[j];
             console.log(`🔄 Processing conversation ${j + 1}/${data.length}: "${conv.title || 'untitled'}"`);
             
-            // Use the new robust message extraction
-            const extractedMessages = extractMessagesFromConversation(conv);
-            console.log(`  - Extracted ${extractedMessages.length} messages from conversation`);
+            // Use the new robust ChatGPT parser
+            const parsedMessages = extractChatGPTConversation(conv);
+            console.log(`  - Parsed ${parsedMessages.length} messages from conversation`);
+            
+            // Debug: Show role distribution
+            const roleCounts = parsedMessages.reduce((acc, msg) => {
+              acc[msg.role] = (acc[msg.role] || 0) + 1;
+              return acc;
+            }, {} as Record<string, number>);
+            console.log(`  - Role distribution:`, roleCounts);
             
             // Convert to FlatMessage format
-            for (const msg of extractedMessages) {
+            for (const msg of parsedMessages) {
               const flatMsg: FlatMessage = {
                 uid: stableMsgId({
                   vendor: source.vendor,
@@ -214,11 +246,18 @@ export async function parseSource(
         } else if (typeof data === 'object' && data !== null) {
           // Handle single conversation object
           console.log(`🔄 Processing single conversation object: "${data.title || 'untitled'}"`);
-          const extractedMessages = extractMessagesFromConversation(data);
-          console.log(`  - Extracted ${extractedMessages.length} messages from conversation`);
+          const parsedMessages = extractChatGPTConversation(data);
+          console.log(`  - Parsed ${parsedMessages.length} messages from conversation`);
+          
+          // Debug: Show role distribution
+          const roleCounts = parsedMessages.reduce((acc, msg) => {
+            acc[msg.role] = (acc[msg.role] || 0) + 1;
+            return acc;
+          }, {} as Record<string, number>);
+          console.log(`  - Role distribution:`, roleCounts);
           
           // Convert to FlatMessage format (same as above)
-          for (const msg of extractedMessages) {
+          for (const msg of parsedMessages) {
             const flatMsg: FlatMessage = {
               uid: stableMsgId({
                 vendor: source.vendor,

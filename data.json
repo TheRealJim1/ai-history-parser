@@ -1,15 +1,15 @@
 {
   "sources": [
     {
-      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-29",
+      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d-2025-10-29",
       "vendor": "chatgpt",
-      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21",
-      "addedAt": 1761699739700,
-      "color": "#ffff8b"
+      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d",
+      "addedAt": 1761705261774,
+      "color": "#00ff7f"
     }
   ],
   "lastActiveSourceIds": [
-    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-29"
+    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d-2025-10-29"
   ],
   "mergeMode": "separate",
   "paneSizes": [

@@ -11,8 +11,14 @@ import { rankedMessageSearch, getSearchStats } from "./lib/score";
 import { enableColumnResizers } from "./resize";
 import { statusBus } from "./ui/status";
 import GraphControls from "./ui/GraphControls";
+import TestView from "./ui/TestView";
+import { buildConvIndex } from "./lib/convIndex";
+import { groupTurns } from "./lib/grouping";
 import type { FlatMessage, Source, Vendor, SearchFacets, SearchProgress, ParseError } from "./types";
 import type AIHistoryParser from "./main";
+
+// Import the CSS
+import "../styles/tw.css";
 
 export const VIEW_TYPE = "ai-history-parser-view";
 
@@ -280,28 +286,58 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     }
   }, [debouncedQuery]);
 
-  // Group ALL filtered messages by conversation for the left list
+  // Build conversation index using the new robust parser
   const groupedByConversation = useMemo(() => {
-    const groups = new Map<string, { key: string; title: string; vendor: string; count: number; lastMessage: FlatMessage }>();
+    console.log("🔄 Building conversation index from", filteredMessages.length, "messages");
+    
+    // First deduplicate messages by uid to prevent duplicates
+    const uniqueMessages = new Map<string, FlatMessage>();
     for (const msg of filteredMessages) {
-      const key = `${msg.vendor}:${msg.conversationId}`;
-      if (!groups.has(key)) {
-        groups.set(key, { key, title: msg.title || "(untitled)", vendor: msg.vendor, count: 0, lastMessage: msg });
-      }
-      const group = groups.get(key)!;
-      group.count++;
-      // Keep the most recent message for sorting
-      if (msg.createdAt > group.lastMessage.createdAt) {
-        group.lastMessage = msg;
-      }
+      uniqueMessages.set(msg.uid, msg);
     }
-    // Sort by last message timestamp (newest first)
-    return Array.from(groups.values()).sort((a, b) => b.lastMessage.createdAt - a.lastMessage.createdAt);
+    const deduplicatedMessages = Array.from(uniqueMessages.values());
+    console.log("🔄 After deduplication:", deduplicatedMessages.length, "unique messages");
+    
+    // Convert FlatMessage to ParsedMsg format for the index builder
+    const parsedMessages = deduplicatedMessages.map(msg => ({
+      id: msg.messageId,
+      convId: msg.conversationId,
+      convTitle: msg.title,
+      role: msg.role as 'user'|'assistant'|'tool'|'system',
+      ts: msg.createdAt,
+      text: msg.text,
+      vendor: 'CHATGPT' as const
+    }));
+    
+    const index = buildConvIndex(parsedMessages);
+    console.log("🔄 Built index with", index.length, "conversations");
+    
+    // Convert to the format expected by the UI
+    const result = index.map(conv => ({
+      key: `${conv.vendor}:${conv.convId}`,
+      title: conv.title,
+      vendor: conv.vendor,
+      count: conv.msgCount,
+      lastMessage: { createdAt: conv.lastTs } as FlatMessage, // For sorting compatibility
+      firstTs: conv.firstTs,
+      lastTs: conv.lastTs
+    }));
+    
+    console.log("🔄 First few conversations:", result.slice(0, 3).map(g => ({ 
+      title: g.title, 
+      count: g.count, 
+      vendor: g.vendor,
+      firstTs: new Date(g.firstTs).toLocaleString(),
+      lastTs: new Date(g.lastTs).toLocaleString()
+    })));
+    
+    return result;
   }, [filteredMessages]);
 
   // Selected conversations (multi-select)
   const [selectedConvKeys, setSelectedConvKeys] = useState<Set<string>>(new Set());
   const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const [useNewView, setUseNewView] = useState(false);
   
   // Pagination for conversation list
   const {
@@ -354,7 +390,25 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
       .sort((a,b) => a.createdAt - b.createdAt);
   }, [filteredMessages, selectedConvKeys]);
 
-  // Pagination for the selected conversation messages (middle pane)
+  // Group messages into turns for better display
+  const selectedConvTurns = useMemo(() => {
+    if (selectedConvMessages.length === 0) return [];
+    
+    // Convert to ParsedMsg format for turn grouping
+    const parsedMessages = selectedConvMessages.map(msg => ({
+      id: msg.messageId,
+      convId: msg.conversationId,
+      convTitle: msg.title,
+      role: msg.role as 'user'|'assistant'|'tool'|'system',
+      ts: msg.createdAt,
+      text: msg.text,
+      vendor: 'CHATGPT' as const
+    }));
+    
+    return groupTurns(parsedMessages, 7 * 60 * 1000); // 7 minute gap
+  }, [selectedConvMessages]);
+
+  // Pagination for the selected conversation turns (middle pane)
   const {
     page: msgPage,
     setPage: setMsgPage,
@@ -362,10 +416,10 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     pageSize: msgPageSize,
     setPageSize: setMsgPageSize,
     total: msgTotal,
-    paged: pagedConvMessages,
+    paged: pagedConvTurns,
     gotoFirst: msgFirst, gotoLast: msgLast, next: msgNext, prev: msgPrev
-  } = usePagination(selectedConvMessages, {
-    defaultPageSize: 100,
+  } = usePagination(selectedConvTurns, {
+    defaultPageSize: 50, // Fewer turns per page since each turn can contain multiple messages
     persistKey: "aip.pageSize",
     currentFilterHash: `${filterHash}|conv=${Array.from(selectedConvKeys).sort().join(',')}`
   });
@@ -729,6 +783,14 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
             <label className="aip-toggle">
               <input
                 type="checkbox"
+                checked={useNewView}
+                onChange={(e) => setUseNewView(e.target.checked)}
+              />
+              <span>New View</span>
+            </label>
+            <label className="aip-toggle">
+              <input
+                type="checkbox"
                 checked={pinHeader}
                 onChange={(e) => setPinHeader(e.target.checked)}
               />
@@ -822,6 +884,9 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
       </header>
 
       {/* Body: 3 columns (left list, center detail, right filters) */}
+      {useNewView ? (
+        <TestView messages={messages} />
+      ) : (
       <div className="aip-body">
         {/* Left Pane: Conversation List */}
         <section className="aip-pane aip-left">
@@ -956,18 +1021,30 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
                 </div>
               </div>
 
-              {pagedConvMessages.map(msg => (
-                <div key={msg.uid} className="aihp-message" onClick={() => setSelectedMessage(msg)}>
-                  <span className={`aihp-role aihp-role-${msg.role}`}>{msg.role}</span>
-                  <MessageContent
-                    text={msg.text}
-                    toolName={(msg as any).toolName}
-                    toolPayload={(msg as any).toolJson ? JSON.parse((msg as any).toolJson) : null}
-                    query={debouncedQuery}
-                    useRegex={facets.regex}
-                    highlightText={highlightText}
-                  />
-                  <div className="aihp-message-meta">{new Date(msg.createdAt).toLocaleString()}</div>
+              {pagedConvTurns.map(turn => (
+                <div key={turn.id} className="aihp-turn">
+                  <div className="aihp-turn-header">
+                    <span className={`aihp-role aihp-role-${turn.role}`}>{turn.role.toUpperCase()}</span>
+                    <span className="aihp-vendor aihp-vendor-chatgpt">{turn.vendor}</span>
+                    <span className="aihp-turn-time">
+                      {new Date(turn.tsStart).toLocaleString()} – {new Date(turn.tsEnd).toLocaleTimeString()}
+                    </span>
+                  </div>
+                  <div className="aihp-turn-messages">
+                    {turn.items.map(msg => (
+                      <div key={msg.id} className="aihp-message" onClick={() => setSelectedMessage(msg as any)}>
+                        <MessageContent
+                          text={msg.text}
+                          toolName={undefined}
+                          toolPayload={null}
+                          query={debouncedQuery}
+                          useRegex={facets.regex}
+                          highlightText={highlightText}
+                        />
+                        <div className="aihp-message-meta">{new Date(msg.ts).toLocaleString()}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
 
@@ -997,7 +1074,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
             <div className="aip-stats">
               <div>Total Messages: {messages.length.toLocaleString()}</div>
               <div>Filtered: {filteredMessages.length.toLocaleString()}</div>
-              <div>Showing: {pagedConvMessages.length.toLocaleString()}</div>
+              <div>Showing: {pagedConvTurns.length.toLocaleString()} turns</div>
               <div>Page: {msgPage} / {msgPageCount}</div>
               <div>Active Sources: {activeSources.size}</div>
               {!statsLoading && (
@@ -1207,6 +1284,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
           </div>
         </aside>
       </div>
+      )}
     </div>
   );
 }
