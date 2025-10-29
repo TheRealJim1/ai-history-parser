@@ -244,6 +244,8 @@ function flattenConversation(
     console.log(`  - Extracted ${messageList.length} messages from mapping`);
   } else {
     console.warn(`  - No messages or mapping found in conversation`);
+    console.warn(`  - Conversation object keys:`, Object.keys(conv));
+    console.warn(`  - Conversation object sample:`, JSON.stringify(conv, null, 2).substring(0, 300) + '...');
   }
 
   // Extract participants for stable conversation ID
