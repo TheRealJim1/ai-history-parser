@@ -388,9 +388,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
           console.log(`✅ Parsed ${result.messages.length} messages from ${source.id}`);
           console.log(`✅ Parse errors: ${result.errors.length}`);
           
-          task.setTotal(result.messages.length);
-          
-          let processed = 0;
+          // Process messages directly without individual progress tracking
           console.log("🔄 Processing individual messages...");
           for (const msg of result.messages) {
             if (task.isCancelled()) {
@@ -405,15 +403,9 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
             }
             
             allMessages.push(msg);
-            processed++;
-            if (processed % 50 === 0) {
-              console.log(`🔄 Processed ${processed}/${result.messages.length} messages`);
-              task.set(processed);
-              await new Promise(r => setTimeout(r, 0)); // Yield to UI
-            }
           }
           
-          console.log(`✅ Finished processing ${processed} messages from ${source.id}`);
+          console.log(`✅ Finished processing ${result.messages.length} messages from ${source.id}`);
           allErrors.push(...result.errors);
         } catch (sourceError: any) {
           console.error(`❌ Error processing source ${source.id}:`, sourceError);
