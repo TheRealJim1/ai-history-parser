@@ -397,10 +397,41 @@
 
 .aihp-conv-checkbox input[type="checkbox"] {
   margin: 0;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   cursor: pointer;
   accent-color: var(--aihp-accent);
+  border: 2px solid var(--aihp-text-muted);
+  border-radius: 4px;
+  background: var(--aihp-bg-primary);
+  appearance: none;
+  position: relative;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.aihp-conv-checkbox input[type="checkbox"]:hover {
+  border-color: var(--aihp-accent);
+  background: var(--aihp-bg-modifier);
+  transform: scale(1.05);
+}
+
+.aihp-conv-checkbox input[type="checkbox"]:checked {
+  background: var(--aihp-accent);
+  border-color: var(--aihp-accent);
+  transform: scale(1.05);
+}
+
+.aihp-conv-checkbox input[type="checkbox"]:checked::after {
+  content: '✓';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: white;
+  font-size: 14px;
+  font-weight: bold;
+  line-height: 1;
 }
 
 .aihp-conv-content {
@@ -476,6 +507,221 @@
 .aihp-conv-date {
   font-size: 10px;
   opacity: 0.6;
+}
+
+/* Loading states */
+.aihp-conversation.loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.aihp-loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+}
+
+.aihp-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--aihp-bg-modifier);
+  border-top: 2px solid var(--aihp-accent);
+  border-radius: 50%;
+  animation: aihp-spin 1s linear infinite;
+}
+
+@keyframes aihp-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Enhanced turn display */
+.aihp-turn {
+  margin-bottom: 16px;
+  border: 1px solid var(--aihp-bg-modifier);
+  border-radius: 8px;
+  background: var(--aihp-bg-primary);
+  overflow: hidden;
+}
+
+.aihp-turn-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--aihp-bg-modifier);
+  border-bottom: 1px solid var(--aihp-bg-modifier);
+  font-size: 12px;
+}
+
+.aihp-role {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+
+.aihp-role-user {
+  background: rgba(59, 130, 246, 0.1);
+  color: rgb(59, 130, 246);
+}
+
+.aihp-role-assistant {
+  background: rgba(34, 197, 94, 0.1);
+  color: rgb(34, 197, 94);
+}
+
+.aihp-role-tool {
+  background: rgba(245, 158, 11, 0.1);
+  color: rgb(245, 158, 11);
+}
+
+.aihp-role-system {
+  background: rgba(147, 51, 234, 0.1);
+  color: rgb(147, 51, 234);
+}
+
+.aihp-vendor {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.aihp-vendor-chatgpt {
+  background: rgba(16, 163, 127, 0.1);
+  color: rgb(16, 163, 127);
+}
+
+.aihp-vendor-claude {
+  background: rgba(255, 107, 53, 0.1);
+  color: rgb(255, 107, 53);
+}
+
+.aihp-vendor-gemini {
+  background: rgba(66, 133, 244, 0.1);
+  color: rgb(66, 133, 244);
+}
+
+.aihp-turn-time {
+  margin-left: auto;
+  color: var(--aihp-text-muted);
+  font-size: 10px;
+}
+
+.aihp-turn-messages {
+  padding: 12px;
+}
+
+.aihp-message {
+  margin-bottom: 8px;
+  padding: 8px;
+  background: var(--aihp-bg-primary);
+  border-radius: 4px;
+  border-left: 3px solid var(--aihp-bg-modifier);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.aihp-message:hover {
+  background: var(--aihp-bg-modifier);
+  border-left-color: var(--aihp-accent);
+}
+
+.aihp-message:last-child {
+  margin-bottom: 0;
+}
+
+.aihp-message-meta {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--aihp-text-muted);
+  opacity: 0.7;
+}
+
+/* Text selection and cursor improvements */
+.aihp-message,
+.aihp-conv-title,
+.aihp-conv-content,
+.aihp-turn-messages {
+  user-select: text;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  cursor: text;
+}
+
+.aihp-message:hover,
+.aihp-conv-title:hover {
+  background: var(--aihp-bg-modifier);
+}
+
+/* Text selection highlighting */
+::selection {
+  background: rgba(59, 130, 246, 0.3);
+  color: var(--aihp-text-normal);
+}
+
+::-moz-selection {
+  background: rgba(59, 130, 246, 0.3);
+  color: var(--aihp-text-normal);
+}
+
+/* Better cursor visibility */
+.aihp-message {
+  cursor: text;
+}
+
+.aihp-message:hover {
+  cursor: text;
+}
+
+/* Ensure text is selectable in message content */
+.aihp-message * {
+  user-select: text;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+}
+
+/* Improve text selection in conversation cards */
+.aihp-conversation {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+.aihp-conversation .aihp-conv-title,
+.aihp-conversation .aihp-conv-meta {
+  user-select: text;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  cursor: text;
+}
+
+/* Better focus states for accessibility */
+.aihp-conv-checkbox input[type="checkbox"]:focus {
+  outline: 2px solid var(--aihp-accent);
+  outline-offset: 2px;
+}
+
+/* Ensure proper text selection in message content areas */
+.aihp-turn-messages,
+.aihp-message-detail {
+  user-select: text;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
 }
 
 /* Pane header controls */

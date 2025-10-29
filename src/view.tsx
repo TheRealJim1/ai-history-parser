@@ -1115,6 +1115,21 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
               )}
             </div>
 
+            {/* Selected Conversations Stats */}
+            {(isMultiSelectMode && selectedConversations.size > 0) || (!isMultiSelectMode && selectedConvKeys.size > 0) ? (
+              <>
+                <h4>Selected Conversations</h4>
+                <div className="aip-stats" style={{ backgroundColor: 'var(--aihp-bg-modifier)', padding: '8px', borderRadius: '4px' }}>
+                  <div style={{ color: 'var(--aihp-accent)', fontWeight: 'bold' }}>
+                    {isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size} selected
+                  </div>
+                  <div>Messages: {selectedConvMessages.length.toLocaleString()}</div>
+                  <div>Turns: {selectedConvTurns.length.toLocaleString()}</div>
+                  <div>Page: {msgPage} / {msgPageCount}</div>
+                </div>
+              </>
+            ) : null}
+
             <h4>Vendor Breakdown</h4>
             <div className="aip-vendor-stats">
               {Object.entries(
@@ -1130,14 +1145,6 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
               ))}
             </div>
 
-            <h4>Graph Builder</h4>
-            <div style={{ padding: '8px', background: '#f0f0f0', borderRadius: '4px' }}>
-              <p>Graph Builder temporarily disabled for debugging</p>
-              {/* <GraphControls 
-                app={plugin.app} 
-                fetchCurrentMessages={getMessagesForCurrentView} 
-              /> */}
-            </div>
 
           </div>
         </aside>
