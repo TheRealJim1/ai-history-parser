@@ -1,24 +1,6 @@
 {
-  "sources": [
-    {
-      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-29",
-      "vendor": "chatgpt",
-      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21",
-      "addedAt": 1761707301139,
-      "color": "#8bffff"
-    },
-    {
-      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-29",
-      "vendor": "chatgpt",
-      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21",
-      "addedAt": 1761707494197,
-      "color": "#8b8bff"
-    }
-  ],
-  "lastActiveSourceIds": [
-    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-29",
-    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-29"
-  ],
+  "sources": [],
+  "lastActiveSourceIds": [],
   "mergeMode": "separate",
   "paneSizes": [
     32,

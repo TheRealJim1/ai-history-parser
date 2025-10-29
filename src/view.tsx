@@ -384,15 +384,33 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
 
   // Messages for the selected conversations
   const selectedConvMessages = useMemo(() => {
-    if (selectedConvKeys.size === 0) return [] as FlatMessage[];
-    return filteredMessages
+    console.log("🔄 Filtering messages for selected conversations");
+    console.log("🔄 Selected conv keys:", Array.from(selectedConvKeys));
+    console.log("🔄 Total filtered messages:", filteredMessages.length);
+    
+    if (selectedConvKeys.size === 0) {
+      console.log("🔄 No conversations selected, returning empty messages");
+      return [] as FlatMessage[];
+    }
+    
+    const selected = filteredMessages
       .filter(m => selectedConvKeys.has(`${m.vendor}:${m.conversationId}`))
       .sort((a,b) => a.createdAt - b.createdAt);
+    
+    console.log("🔄 Selected messages:", selected.length);
+    console.log("🔄 Sample selected message:", selected[0]);
+    
+    return selected;
   }, [filteredMessages, selectedConvKeys]);
 
   // Group messages into turns for better display
   const selectedConvTurns = useMemo(() => {
-    if (selectedConvMessages.length === 0) return [];
+    console.log("🔄 Building turns from", selectedConvMessages.length, "selected messages");
+    
+    if (selectedConvMessages.length === 0) {
+      console.log("🔄 No selected messages, returning empty turns");
+      return [];
+    }
     
     // Convert to ParsedMsg format for turn grouping
     const parsedMessages = selectedConvMessages.map(msg => ({
@@ -405,7 +423,14 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
       vendor: 'CHATGPT' as const
     }));
     
-    return groupTurns(parsedMessages, 7 * 60 * 1000); // 7 minute gap
+    console.log("🔄 Converted to parsed messages:", parsedMessages.length);
+    console.log("🔄 Sample parsed message:", parsedMessages[0]);
+    
+    const turns = groupTurns(parsedMessages, 7 * 60 * 1000); // 7 minute gap
+    console.log("🔄 Grouped into", turns.length, "turns");
+    console.log("🔄 Sample turn:", turns[0]);
+    
+    return turns;
   }, [selectedConvMessages]);
 
   // Pagination for the selected conversation turns (middle pane)
@@ -496,11 +521,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
               break;
             }
             
-            // Validate message structure
-            if (!msg.uid || !msg.vendor || !msg.text || !msg.conversationId) {
-              console.warn("⚠️ Invalid message structure:", msg);
-              continue;
-            }
+            // Message structure is already validated by the robust parser
             
             allMessages.push(msg);
           }
