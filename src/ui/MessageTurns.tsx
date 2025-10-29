@@ -132,3 +132,4 @@ function renderToolSafe(m: Msg){
     return "```json\n" + JSON.stringify(obj, null, 2) + "\n```";
   } catch { return m.text; }
 }
+

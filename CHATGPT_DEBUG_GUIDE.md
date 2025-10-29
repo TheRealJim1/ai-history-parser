@@ -206,3 +206,4 @@ Use these to verify plugin state and functionality.
 ---
 
 **Note**: This plugin is an Obsidian plugin for parsing AI conversation history. The main goal is to create a searchable, graphable database of AI conversations with advanced relationship mapping capabilities.
+

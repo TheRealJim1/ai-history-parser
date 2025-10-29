@@ -205,18 +205,14 @@ export async function parseSource(
             console.log(`  - Role distribution:`, roleCounts);
             
             // Convert to FlatMessage format
+            // Use a consistent conversation ID for all messages in this conversation
+            const conversationId = `${source.vendor}:${parsedMessages[0]?.convId || 'unknown'}`;
+            
             for (const msg of parsedMessages) {
               const flatMsg: FlatMessage = {
                 uid: stableMsgId({
                   vendor: source.vendor,
-                  conversationStableId: stableConvId({
-                    vendor: source.vendor,
-                    title: msg.convTitle,
-                    createdAt: msg.ts,
-                    participants: [msg.role],
-                    firstMsgText: msg.text.substring(0, 100),
-                    extra: { nativeId: msg.convId }
-                  }),
+                  conversationStableId: conversationId,
                   role: msg.role,
                   createdAt: msg.ts,
                   text: msg.text,
@@ -225,14 +221,7 @@ export async function parseSource(
                 }),
                 vendor: source.vendor,
                 sourceId: source.id,
-                conversationId: stableConvId({
-                  vendor: source.vendor,
-                  title: msg.convTitle,
-                  createdAt: msg.ts,
-                  participants: [msg.role],
-                  firstMsgText: msg.text.substring(0, 100),
-                  extra: { nativeId: msg.convId }
-                }),
+                conversationId: conversationId,
                 messageId: msg.id,
                 role: msg.role,
                 createdAt: msg.ts,
@@ -257,18 +246,14 @@ export async function parseSource(
           console.log(`  - Role distribution:`, roleCounts);
           
           // Convert to FlatMessage format (same as above)
+          // Use a consistent conversation ID for all messages in this conversation
+          const conversationId = `${source.vendor}:${parsedMessages[0]?.convId || 'single'}`;
+          
           for (const msg of parsedMessages) {
             const flatMsg: FlatMessage = {
               uid: stableMsgId({
                 vendor: source.vendor,
-                conversationStableId: stableConvId({
-                  vendor: source.vendor,
-                  title: msg.convTitle,
-                  createdAt: msg.ts,
-                  participants: [msg.role],
-                  firstMsgText: msg.text.substring(0, 100),
-                  extra: { nativeId: msg.convId }
-                }),
+                conversationStableId: conversationId,
                 role: msg.role,
                 createdAt: msg.ts,
                 text: msg.text,
@@ -277,14 +262,7 @@ export async function parseSource(
               }),
               vendor: source.vendor,
               sourceId: source.id,
-              conversationId: stableConvId({
-                vendor: source.vendor,
-                title: msg.convTitle,
-                createdAt: msg.ts,
-                participants: [msg.role],
-                firstMsgText: msg.text.substring(0, 100),
-                extra: { nativeId: msg.convId }
-              }),
+              conversationId: conversationId,
               messageId: msg.id,
               role: msg.role,
               createdAt: msg.ts,

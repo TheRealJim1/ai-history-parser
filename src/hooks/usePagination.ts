@@ -57,3 +57,4 @@ export function usePagination<T>(
     prev: () => setPage(p => Math.max(p - 1, 1)),
   };
 }
+

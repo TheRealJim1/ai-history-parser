@@ -7,3 +7,4 @@ export function matchesQuery(title:string, body:string, q:string, regex:boolean)
   }
   return (title+ ' ' + body).toLowerCase().includes(query.toLowerCase());
 }
+

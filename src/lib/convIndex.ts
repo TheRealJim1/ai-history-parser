@@ -30,3 +30,4 @@ export function buildConvIndex(msgs: ParsedMsg[]): ConvRow[] {
   }
   return [...map.values()].sort((a,b)=> b.lastTs - a.lastTs);
 }
+

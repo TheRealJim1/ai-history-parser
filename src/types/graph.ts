@@ -31,3 +31,4 @@ export interface GraphBuildOptions {
   dateFrom?: number;
   dateTo?: number;
 }
+

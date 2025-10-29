@@ -13,3 +13,4 @@ module.exports = {
   },
   corePlugins: { preflight: false } // Obsidian already resets
 }
+

@@ -41,3 +41,4 @@ export const Paginator: React.FC<{
     </div>
   );
 };
+

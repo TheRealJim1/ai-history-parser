@@ -89,3 +89,4 @@ export default function GraphControls({ app, fetchCurrentMessages }: Props) {
     </div>
   );
 }
+

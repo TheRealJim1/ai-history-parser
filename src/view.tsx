@@ -14,6 +14,9 @@ import GraphControls from "./ui/GraphControls";
 import TestView from "./ui/TestView";
 import { buildConvIndex } from "./lib/convIndex";
 import { groupTurns } from "./lib/grouping";
+import { LoadingSpinner, LoadingOverlay, LoadingButton } from "./ui/LoadingSpinner";
+import { ConversationCard } from "./ui/ConversationCard";
+import { MultiSelectToolbar } from "./ui/MultiSelectToolbar";
 import type { FlatMessage, Source, Vendor, SearchFacets, SearchProgress, ParseError } from "./types";
 import type AIHistoryParser from "./main";
 
@@ -205,7 +208,11 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     regex: false
   });
   const [selectedMessage, setSelectedMessage] = useState<FlatMessage | null>(null);
-  const [debugMode, setDebugMode] = useState(false);
+
+  // Multi-select state
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+  const [selectedConversations, setSelectedConversations] = useState<Set<string>>(new Set());
+  const [conversationLoading, setConversationLoading] = useState<Set<string>>(new Set());
 
   // Local state for messages and database
   const [messages, setMessages] = useState<FlatMessage[]>([]);
@@ -301,7 +308,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     // Convert FlatMessage to ParsedMsg format for the index builder
     const parsedMessages = deduplicatedMessages.map(msg => ({
       id: msg.messageId,
-      convId: msg.conversationId,
+      convId: msg.conversationId, // This is already in the format "vendor:convId"
       convTitle: msg.title,
       role: msg.role as 'user'|'assistant'|'tool'|'system',
       ts: msg.createdAt,
@@ -314,7 +321,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     
     // Convert to the format expected by the UI
     const result = index.map(conv => ({
-      key: `${conv.vendor}:${conv.convId}`,
+      key: conv.convId, // This is already in the format "vendor:convId"
       title: conv.title,
       vendor: conv.vendor,
       count: conv.msgCount,
@@ -367,6 +374,11 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
 
   // Handle conversation selection
   const handleConvClick = (convKey: string, ctrlKey: boolean) => {
+    console.log("🔄 Conversation clicked:", convKey);
+    console.log("🔄 Multi-select mode:", multiSelectMode);
+    console.log("🔄 Ctrl key:", ctrlKey);
+    console.log("🔄 Current selected keys:", Array.from(selectedConvKeys));
+    
     if (multiSelectMode || ctrlKey) {
       setSelectedConvKeys(prev => {
         const newSet = new Set(prev);
@@ -375,10 +387,12 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
         } else {
           newSet.add(convKey);
         }
+        console.log("🔄 New selected keys:", Array.from(newSet));
         return newSet;
       });
     } else {
       setSelectedConvKeys(new Set([convKey]));
+      console.log("🔄 Single select, new selected keys:", [convKey]);
     }
   };
 
@@ -394,7 +408,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     }
     
     const selected = filteredMessages
-      .filter(m => selectedConvKeys.has(`${m.vendor}:${m.conversationId}`))
+      .filter(m => selectedConvKeys.has(m.conversationId))
       .sort((a,b) => a.createdAt - b.createdAt);
     
     console.log("🔄 Selected messages:", selected.length);
@@ -432,6 +446,44 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     
     return turns;
   }, [selectedConvMessages]);
+
+  // Multi-select helper functions
+  const handleToggleMultiSelect = useCallback(() => {
+    setIsMultiSelectMode(prev => !prev);
+    if (isMultiSelectMode) {
+      setSelectedConversations(new Set());
+    }
+  }, [isMultiSelectMode]);
+
+  const handleSelectConversation = useCallback((convId: string) => {
+    if (isMultiSelectMode) {
+      setSelectedConversations(prev => {
+        const newSet = new Set(prev);
+        if (newSet.has(convId)) {
+          newSet.delete(convId);
+        } else {
+          newSet.add(convId);
+        }
+        return newSet;
+      });
+    } else {
+      setSelectedConvKeys(new Set([convId]));
+    }
+  }, [isMultiSelectMode]);
+
+  const handleSelectAll = useCallback(() => {
+    const allConvIds = new Set(groupedByConversation.map(conv => conv.convId));
+    setSelectedConversations(allConvIds);
+  }, [groupedByConversation]);
+
+  const handleSelectNone = useCallback(() => {
+    setSelectedConversations(new Set());
+  }, []);
+
+  const handleExportSelected = useCallback(() => {
+    console.log("Exporting selected conversations:", Array.from(selectedConversations));
+    // TODO: Implement export functionality
+  }, [selectedConversations]);
 
   // Pagination for the selected conversation turns (middle pane)
   const {
@@ -911,84 +963,39 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
       <div className="aip-body">
         {/* Left Pane: Conversation List */}
         <section className="aip-pane aip-left">
-          <div className="aip-pane-header">
-            <div className="aip-pane-header-top">
-              {status === "loading" && <span>Loading…</span>}
-              {status === "ready" && (
-                <span>
-                  {groupedByConversation.length.toLocaleString()} conversations
-                  {dbStats && ` • ${dbStats.totalMessages} msgs in DB`}
-                </span>
-              )}
-              {status === "error" && <span className="aihp-err">{error}</span>}
-              {searchProgress.isSearching && (
-                <span>Searching... {searchProgress.current}/{searchProgress.total}</span>
-              )}
-            </div>
-            <div className="aip-pane-header-controls">
-              <label className="aip-toggle">
-                <input
-                  type="checkbox"
-                  checked={multiSelectMode}
-                  onChange={(e) => setMultiSelectMode(e.target.checked)}
-                />
-                <span>Multi-select</span>
-              </label>
-              {selectedConvKeys.size > 0 && (
-                <button 
-                  className="aihp-btn-small"
-                  onClick={() => setSelectedConvKeys(new Set())}
-                >
-                  Clear ({selectedConvKeys.size})
-                </button>
-              )}
-            </div>
-          </div>
+          <MultiSelectToolbar
+            selectedCount={isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size}
+            totalCount={groupedByConversation.length}
+            isMultiSelectMode={isMultiSelectMode}
+            onToggleMultiSelect={handleToggleMultiSelect}
+            onSelectAll={handleSelectAll}
+            onSelectNone={handleSelectNone}
+            onExportSelected={handleExportSelected}
+            isLoading={messagesLoading}
+          />
           
-          <div className="aip-messages">
-            {messagesLoading ? (
-              <div>
-                <div className="aip-skeleton skel-row" />
-                <div className="aip-skeleton skel-row" />
-                <div className="aip-skeleton skel-card" />
-                <div className="aip-skeleton skel-row" />
-                <div className="aip-skeleton skel-card" />
-                <div className="aip-skeleton skel-row" />
-              </div>
-            ) : (
-              pagedConversations.map(g => (
-                <div
+          <LoadingOverlay isLoading={messagesLoading} text="Loading conversations...">
+            <div className="aip-messages">
+              {pagedConversations.map(g => (
+                <ConversationCard
                   key={g.key}
-                  className={`aihp-conversation ${selectedConvKeys.has(g.key) ? 'selected' : ''}`}
-                  onClick={(e) => handleConvClick(g.key, e.ctrlKey || e.metaKey)}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <div className="aihp-conv-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedConvKeys.has(g.key)}
-                      onChange={() => handleConvClick(g.key, false)}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </div>
-                  <div className="aihp-conv-content">
-                    <div className="aihp-conv-header">
-                      <span className="aihp-conv-title">{g.title || "(untitled)"}</span>
-                      <span className={`aihp-conv-vendor aihp-vendor-${g.vendor}`}>
-                        {g.vendor.toUpperCase()}
-                      </span>
-                    </div>
-                    <div className="aihp-conv-meta">
-                      <span className="aihp-conv-count">{g.count} msgs</span>
-                      <span className="aihp-conv-date">
-                        {new Date(g.lastMessage.createdAt).toLocaleDateString()}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
+                  conversation={{
+                    convId: g.key,
+                    title: g.title || "(untitled)",
+                    vendor: g.vendor,
+                    msgCount: g.count,
+                    firstTs: g.firstMessage?.createdAt || 0,
+                    lastTs: g.lastMessage?.createdAt || 0
+                  }}
+                  isSelected={isMultiSelectMode ? selectedConversations.has(g.key) : selectedConvKeys.has(g.key)}
+                  isMultiSelectMode={isMultiSelectMode}
+                  onSelect={handleSelectConversation}
+                  onToggle={handleSelectConversation}
+                  isLoading={conversationLoading.has(g.key)}
+                />
+              ))}
+            </div>
+          </LoadingOverlay>
 
           {/* Conversation List Pagination */}
           {pagedConversations.length > 0 && (
@@ -1010,20 +1017,21 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
 
         {/* Center Pane: Selected Conversation Messages + Pagination */}
         <section className="aip-pane aip-center">
-          {isSearching && (
-            <div className="aip-overlay">
-              <div>
-                <div className="aip-progress-bar" style={{ width: 240 }}>
-                  <div className="aip-progress-fill is-indeterminate" />
-                </div>
-                <div style={{ marginTop: 8, textAlign: "center", fontSize: 12 }}>Searching…</div>
+          <LoadingOverlay isLoading={isSearching} text="Searching messages...">
+            {selectedConvMessages.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full text-gray-500 dark:text-gray-400">
+                <svg className="w-16 h-16 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+                <h3 className="text-lg font-medium mb-2">No conversations selected</h3>
+                <p className="text-sm text-center max-w-sm">
+                  {isMultiSelectMode 
+                    ? "Select one or more conversations from the left to view their messages"
+                    : "Click on a conversation from the left to view its messages"
+                  }
+                </p>
               </div>
-            </div>
-          )}
-          
-          {selectedConvMessages.length === 0 && (
-            <div className="aihp-empty">Select a conversation from the left</div>
-          )}
+            )}
 
           {selectedConvMessages.length > 0 && (
             <div className="aihp-message-detail">
@@ -1082,6 +1090,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
               />
             </div>
           )}
+          </LoadingOverlay>
         </section>
 
         {/* Right Pane: Filters & Stats */}
@@ -1130,178 +1139,6 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
               /> */}
             </div>
 
-            <h4>Debug & Health</h4>
-            <div className="aip-debug-controls">
-              <label className="aip-toggle">
-                <input
-                  type="checkbox"
-                  checked={debugMode}
-                  onChange={(e) => setDebugMode(e.target.checked)}
-                />
-                <span>Debug Mode</span>
-              </label>
-              <button 
-                onClick={() => {
-                  console.log("🧪 Test State button clicked!");
-                  console.log("🧪 Manual test - current state:");
-                  console.log("Messages:", messages.length);
-                  console.log("Filtered:", filteredMessages.length);
-                  console.log("Active Sources:", Array.from(activeSources));
-                  console.log("Status:", status);
-                  console.log("Error:", error);
-                  console.log("Plugin:", !!plugin);
-                  console.log("Plugin settings:", plugin?.settings);
-                }}
-                style={{ 
-                  marginLeft: '8px', 
-                  padding: '6px 12px', 
-                  fontSize: '12px',
-                  backgroundColor: '#007acc',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                Test State
-              </button>
-              <button 
-                onClick={async () => {
-                  console.log("🧪 Test Load button clicked!");
-                  console.log("🧪 Testing direct loadMessages...");
-                  try {
-                    await loadMessages();
-                    console.log("✅ loadMessages completed");
-                  } catch (e) {
-                    console.error("❌ loadMessages failed:", e);
-                  }
-                }}
-                style={{ 
-                  marginLeft: '8px', 
-                  padding: '6px 12px', 
-                  fontSize: '12px',
-                  backgroundColor: '#28a745',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                Test Load
-              </button>
-              <button 
-                onClick={() => {
-                  console.log("🧪 Test Status button clicked!");
-                  console.log("🧪 Testing status bar...");
-                  const task = statusBus.begin("test", "Testing Status Bar", 10);
-                  
-                  let i = 0;
-                  const interval = setInterval(() => {
-                    i++;
-                    task.tick(1);
-                    if (i >= 10) {
-                      clearInterval(interval);
-                      task.end();
-                    }
-                  }, 500);
-                }}
-                style={{ 
-                  marginLeft: '8px', 
-                  padding: '6px 12px', 
-                  fontSize: '12px',
-                  backgroundColor: '#ffc107',
-                  color: 'black',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                Test Status
-              </button>
-              <button 
-                onClick={() => {
-                  console.log("🧪 Test Direct button clicked!");
-                  console.log("🧪 Testing direct status bar...");
-                  // Find the status bar element directly
-                  const statusBar = document.querySelector('.aihp-status-bar');
-                  if (statusBar) {
-                    console.log("📊 Found status bar element:", statusBar);
-                    console.log("📊 Status bar text:", statusBar.textContent);
-                    console.log("📊 Status bar visible:", statusBar.offsetParent !== null);
-                    statusBar.textContent = "Direct Test: Working!";
-                    statusBar.style.backgroundColor = "red";
-                    statusBar.style.color = "white";
-                    setTimeout(() => {
-                      statusBar.textContent = "AI Parser: idle";
-                      statusBar.style.backgroundColor = "";
-                      statusBar.style.color = "";
-                    }, 2000);
-                  } else {
-                    console.log("❌ Status bar element not found!");
-                  }
-                }}
-                style={{ 
-                  marginLeft: '8px', 
-                  padding: '6px 12px', 
-                  fontSize: '12px',
-                  backgroundColor: '#dc3545',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                Test Direct
-              </button>
-              <button 
-                onClick={() => {
-                  console.log("🧪 Test Header button clicked!");
-                  console.log("🧪 Testing HeaderProgress...");
-                  const task = statusBus.begin("header-test", "Testing Header Progress", 5);
-                  
-                  let i = 0;
-                  const interval = setInterval(() => {
-                    i++;
-                    task.tick(1);
-                    task.setSub(`Step ${i}/5`);
-                    if (i >= 5) {
-                      clearInterval(interval);
-                      setTimeout(() => task.end(), 500);
-                    }
-                  }, 1000);
-                }}
-                style={{ 
-                  marginLeft: '8px', 
-                  padding: '6px 12px', 
-                  fontSize: '12px',
-                  backgroundColor: '#6f42c1',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                Test Header
-              </button>
-            </div>
-
-            {debugMode && (
-              <>
-                <HealthCheckPanel checks={checkPluginHealth(plugin)} />
-                <HealthCheckPanel checks={checkSourcesHealth(plugin.settings.sources)} />
-                <HealthCheckPanel checks={checkMessagesHealth(messages)} />
-                
-                <div className="aip-debug-info">
-                  <h5>Debug Info</h5>
-                  <div><strong>Status:</strong> {status}</div>
-                  <div><strong>Messages:</strong> {messages.length}</div>
-                  <div><strong>Active Sources:</strong> {activeSources.size}</div>
-                  <div><strong>Filtered Messages:</strong> {filteredMessages.length}</div>
-                  <div><strong>Selected Conv:</strong> {selectedConvKey || 'none'}</div>
-                  <div><strong>Selected Conv Messages:</strong> {selectedConvMessages.length}</div>
-                </div>
-              </>
-            )}
           </div>
         </aside>
       </div>

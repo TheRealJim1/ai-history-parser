@@ -72,3 +72,4 @@ export function extractMessagesFromConversation(conv:any){
 }
 
 function cryptoRandom(){ return Math.random().toString(36).slice(2,10); }
+

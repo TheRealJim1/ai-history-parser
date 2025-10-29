@@ -12,6 +12,6 @@
 .badge-chatgpt { @apply bg-[#10a37f]/10 text-[#10a37f] border border-[#10a37f]/40 px-1.5 py-0.5 rounded; }
 .badge-claude  { @apply bg-[#ff6b35]/10 text-[#ff6b35] border border-[#ff6b35]/40 px-1.5 py-0.5 rounded; }
 .badge-gemini  { @apply bg-[#4285f4]/10 text-[#4285f4] border border-[#4285f4]/40 px-1.5 py-0.5 rounded; }
-.badge-other   { @apply bg-faint/10 text-faint border border-faint/40 px-1.5 py-0.5 rounded; }
+.badge-other   { @apply bg-gray-500/10 text-gray-500 border border-gray-500/40 px-1.5 py-0.5 rounded; }
 
-.card { @apply border border-border rounded-md bg-surface; }
+.card { @apply border border-gray-300 rounded-md bg-white; }

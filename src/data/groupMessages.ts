@@ -45,3 +45,4 @@ export function bucketByDay(turns: Turn[]): DayBucket[] {
     .sort((a,b)=> new Date(a[0]).getTime() - new Date(b[0]).getTime())
     .map(([day, turns])=>({ day, turns }));
 }
+

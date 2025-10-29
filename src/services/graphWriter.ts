@@ -75,3 +75,4 @@ export async function resetGraph(app: App, baseDir: string) {
   const f = app.vault.getAbstractFileByPath(base);
   if (f) await app.vault.delete(f, true);
 }
+

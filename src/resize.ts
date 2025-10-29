@@ -41,3 +41,4 @@ export function enableColumnResizers(root: HTMLElement) {
   attach(".aip-left", "--aip-col-left", "left");
   attach(".aip-right", "--aip-col-right", "right");
 }
+
