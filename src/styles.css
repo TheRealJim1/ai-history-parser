@@ -672,50 +672,50 @@
 }
 
 /* Header Progress Bar */
-.aip-header-progress { 
-  display: flex; 
-  align-items: center; 
-  gap: .5rem; 
-  padding: .35rem .5rem;
-  border-bottom: 1px solid var(--background-modifier-border); 
-  background: var(--background-primary); 
-  position: sticky; 
-  top: 0; 
-  z-index: 70; 
+.aip-header-progress{
+  position:sticky;
+  top:0;
+  z-index:70;
+  display:flex;
+  align-items:center;
+  gap:.6rem;
+  padding:.35rem .6rem;
+  background:var(--background-primary);
+  border-bottom:1px solid var(--background-modifier-border)
 }
 
-.aip-header-progress .bar { 
-  flex: 1; 
-  height: 6px; 
-  background: var(--background-modifier-border); 
-  border-radius: 4px; 
-  overflow: hidden; 
+.aip-header-progress .bar{
+  flex:1;
+  height:6px;
+  background:var(--background-modifier-border);
+  border-radius:4px;
+  overflow:hidden
 }
 
-.aip-header-progress .bar .fill { 
-  height: 100%; 
-  background: var(--interactive-accent); 
-  transition: width 120ms linear; 
+.aip-header-progress .bar .fill{
+  height:100%;
+  background:var(--interactive-accent);
+  transition:width 120ms linear
 }
 
-.aip-header-progress .bar .fill.indeterminate {
-  width: 30%; 
-  animation: aip-scan 1.2s linear infinite;
-  background: repeating-linear-gradient(45deg, var(--interactive-accent), var(--interactive-accent) 8px,
-    color-mix(in oklab, var(--interactive-accent) 60%, #000) 8px, color-mix(in oklab, var(--interactive-accent) 60%, #000) 16px);
+.aip-header-progress .bar .fill.ind{
+  width:30%;
+  animation:aip-scan 1.2s linear infinite;
+  background:repeating-linear-gradient(45deg,var(--interactive-accent),var(--interactive-accent)8px,
+    color-mix(in oklab,var(--interactive-accent)60%,#000)8px,color-mix(in oklab,var(--interactive-accent)60%,#000)16px)
 }
 
-@keyframes aip-scan { 
-  from { transform: translateX(-100%) } 
-  to { transform: translateX(300%) } 
+@keyframes aip-scan{
+  from{transform:translateX(-100%)}
+  to{transform:translateX(300%)}
 }
 
-.aip-header-progress .label { 
-  font-size: .85rem; 
-  opacity: .85; 
-  white-space: nowrap; 
-  overflow: hidden; 
-  text-overflow: ellipsis; 
+.aip-header-progress .txt{
+  font-size:.85rem;
+  opacity:.85;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis
 }
 
 /* Responsive design */

@@ -1,3 +1,5 @@
+import { matchesQuery } from "./search";
+
 // Very light BM25-ish blend + recency. Fast and good enough.
 export type SearchDoc = {
   id: string;
@@ -158,10 +160,16 @@ export function rankedMessageSearch(
     if (options.to && msg.createdAt && msg.createdAt > options.to) continue;
     if (options.sourceIds && options.sourceIds.length > 0 && !options.sourceIds.includes(msg.sourceId)) continue;
 
-    const doc = messageToSearchDoc(msg);
-    const s = useRegex ? regexScore(doc, query) : score(doc, tokens, now);
+    // Use the improved search function
+    const title = msg.title || "";
+    const body = msg.text || "";
+    const matches = matchesQuery(title, body, query, useRegex);
 
-    if (s > 0) scored.push({ msg, score: s });
+    if (matches) {
+      const doc = messageToSearchDoc(msg);
+      const s = useRegex ? regexScore(doc, query) : score(doc, tokens, now);
+      scored.push({ msg, score: s });
+    }
   }
 
   scored.sort((a, b) => b.score - a.score);

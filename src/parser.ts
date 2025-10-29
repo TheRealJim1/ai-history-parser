@@ -4,6 +4,7 @@ import type { ConversationLite, ExportIndex, MessageLite, ParseError, FlatMessag
 import { stableConvId, stableMsgId } from "./lib/ids";
 import { extractText, toEpoch, canon, normText } from "./lib/hash";
 import { toSearchDoc, rankedMessageSearch } from "./lib/score";
+import { extractMessagesFromConversation } from "./lib/normalize";
 
 // Parse multiple sources and return flattened messages
 export async function parseMultipleSources(
@@ -149,27 +150,111 @@ export async function parseSource(
         // Debug: Show structure of the data
         if (Array.isArray(data) && data.length > 0) {
           console.log(`🔍 First item structure:`, Object.keys(data[0]));
-          console.log(`🔍 First item sample:`, JSON.stringify(data[0], null, 2).substring(0, 500) + '...');
+          console.log(`🔍 First item sample:`, JSON.stringify(data[0], null, 2).substring(0, 1000) + '...');
+          // Check if it's a conversation index vs actual conversations
+          if (data[0].id && data[0].conversation_id && !data[0].messages && !data[0].mapping) {
+            console.log(`⚠️ This appears to be a conversation INDEX, not the actual conversations with messages`);
+            console.log(`⚠️ We need to load the actual conversation files, not the index`);
+          }
         } else if (typeof data === 'object' && data !== null) {
           console.log(`🔍 Object structure:`, Object.keys(data));
-          console.log(`🔍 Object sample:`, JSON.stringify(data, null, 2).substring(0, 500) + '...');
+          console.log(`🔍 Object sample:`, JSON.stringify(data, null, 2).substring(0, 1000) + '...');
         }
         
         if (Array.isArray(data)) {
           console.log(`🔄 Processing ${data.length} conversations...`);
+          
           for (let j = 0; j < data.length; j++) {
             const conv = data[j];
             console.log(`🔄 Processing conversation ${j + 1}/${data.length}: "${conv.title || 'untitled'}"`);
-            const convMessages = flattenConversation(conv, source, file.name as any);
-            console.log(`  - Conversation "${conv.title || 'untitled'}" -> ${convMessages.length} messages`);
-            messages.push(...convMessages);
+            
+            // Use the new robust message extraction
+            const extractedMessages = extractMessagesFromConversation(conv);
+            console.log(`  - Extracted ${extractedMessages.length} messages from conversation`);
+            
+            // Convert to FlatMessage format
+            for (const msg of extractedMessages) {
+              const flatMsg: FlatMessage = {
+                uid: stableMsgId({
+                  vendor: source.vendor,
+                  conversationStableId: stableConvId({
+                    vendor: source.vendor,
+                    title: msg.convTitle,
+                    createdAt: msg.ts,
+                    participants: [msg.role],
+                    firstMsgText: msg.text.substring(0, 100),
+                    extra: { nativeId: msg.convId }
+                  }),
+                  role: msg.role,
+                  createdAt: msg.ts,
+                  text: msg.text,
+                  toolName: undefined,
+                  attachments: undefined
+                }),
+                vendor: source.vendor,
+                sourceId: source.id,
+                conversationId: stableConvId({
+                  vendor: source.vendor,
+                  title: msg.convTitle,
+                  createdAt: msg.ts,
+                  participants: [msg.role],
+                  firstMsgText: msg.text.substring(0, 100),
+                  extra: { nativeId: msg.convId }
+                }),
+                messageId: msg.id,
+                role: msg.role,
+                createdAt: msg.ts,
+                title: msg.convTitle,
+                text: msg.text,
+                toolJson: null
+              };
+              messages.push(flatMsg);
+            }
           }
         } else if (typeof data === 'object' && data !== null) {
           // Handle single conversation object
           console.log(`🔄 Processing single conversation object: "${data.title || 'untitled'}"`);
-          const convMessages = flattenConversation(data, source, file.name as any);
-          console.log(`  - Conversation "${data.title || 'untitled'}" -> ${convMessages.length} messages`);
-          messages.push(...convMessages);
+          const extractedMessages = extractMessagesFromConversation(data);
+          console.log(`  - Extracted ${extractedMessages.length} messages from conversation`);
+          
+          // Convert to FlatMessage format (same as above)
+          for (const msg of extractedMessages) {
+            const flatMsg: FlatMessage = {
+              uid: stableMsgId({
+                vendor: source.vendor,
+                conversationStableId: stableConvId({
+                  vendor: source.vendor,
+                  title: msg.convTitle,
+                  createdAt: msg.ts,
+                  participants: [msg.role],
+                  firstMsgText: msg.text.substring(0, 100),
+                  extra: { nativeId: msg.convId }
+                }),
+                role: msg.role,
+                createdAt: msg.ts,
+                text: msg.text,
+                toolName: undefined,
+                attachments: undefined
+              }),
+              vendor: source.vendor,
+              sourceId: source.id,
+              conversationId: stableConvId({
+                vendor: source.vendor,
+                title: msg.convTitle,
+                createdAt: msg.ts,
+                participants: [msg.role],
+                firstMsgText: msg.text.substring(0, 100),
+                extra: { nativeId: msg.convId }
+              }),
+              messageId: msg.id,
+              role: msg.role,
+              createdAt: msg.ts,
+              title: msg.convTitle,
+              text: msg.text,
+              toolJson: null
+            };
+            messages.push(flatMsg);
+          }
         } else {
           console.warn(`⚠️ Expected array or object but got ${typeof data}`);
         }

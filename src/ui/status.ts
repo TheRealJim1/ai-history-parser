@@ -1,93 +1,68 @@
-type Listener = (s?: StatusSnapshot) => void;
-
 export type StatusSnapshot = {
-  id: string;
-  label: string;
+  id: string; 
+  label: string; 
   sublabel?: string;
-  total?: number;       // provide this → percent works
-  done?: number;
+  total?: number; 
+  done?: number; 
   active: boolean;
-  error?: string;
-  startedAt?: number;
+  error?: string; 
+  startedAt?: number; 
   etaSec?: number;
-  cancelled?: boolean;
 };
 
+type Listener = (s?: StatusSnapshot)=>void;
+
 class StatusBus {
-  private s?: StatusSnapshot;
-  private L = new Set<Listener>();
+  private s?: StatusSnapshot; 
+  private L = new Set<Listener>(); 
   private timer?: number;
 
-  subscribe(fn: Listener) { 
+  subscribe(fn:Listener){ 
     this.L.add(fn); 
-    return () => this.L.delete(fn); 
+    return ()=>this.L.delete(fn); 
   }
   
-  get() { 
+  get(){ 
     return this.s; 
   }
 
-  private emit(s?: StatusSnapshot) {
-    this.s = s;
-    for (const fn of this.L) fn(this.s);
+  private emit(s?: StatusSnapshot){ 
+    this.s = s; 
+    this.L.forEach(f=>f(s)); 
   }
 
-  begin(id: string, label: string, total?: number) {
+  begin(id:string,label:string,total?:number){
     const startedAt = Date.now();
-    const snapshot: StatusSnapshot = { id, label, total, done: 0, active: true, startedAt, cancelled: false };
-    this.emit(snapshot);
+    this.emit({ id,label,total,done:0, active:true, startedAt });
 
     return {
-      tick: (delta=1, sublabel?: string) => {
-        if (this.s?.cancelled) return;
-        const done = Math.max(0, (this.s?.done ?? 0) + delta);
-        const totalNow = this.s?.total;
-        let etaSec: number | undefined;
-        
-        if (totalNow && done > 0) {
-          const rate = (Date.now() - startedAt) / done;           // ms per unit
-          etaSec = Math.max(0, Math.round(((totalNow - done) * rate) / 1000));
+      setTotal:(t:number)=> this.emit({ ...(this.s as StatusSnapshot), total:t }),
+      tick:(delta=1, sublabel?:string)=>{
+        const s = this.s as StatusSnapshot; 
+        const done = Math.max(0,(s.done??0)+delta);
+        let etaSec; 
+        if (s.total && done>0){ 
+          const rate=(Date.now()- (s.startedAt||Date.now()))/done; 
+          etaSec=Math.max(0,Math.round(((s.total-done)*rate)/1000)); 
         }
-        
-        this.emit({ ...(this.s as StatusSnapshot), done, sublabel, etaSec, active: true });
+        this.emit({ ...s, done, sublabel, etaSec, active:true });
       },
-      
-      set: (done: number, sublabel?: string) => {
-        if (this.s?.cancelled) return;
-        let etaSec: number | undefined;
-        if (this.s?.total && done > 0) {
-          const rate = (Date.now() - startedAt) / done;
-          etaSec = Math.max(0, Math.round(((this.s.total - done) * rate) / 1000));
+      set:(done:number, sublabel?:string)=>{
+        const s = this.s as StatusSnapshot; 
+        let etaSec;
+        if (s.total && done>0){ 
+          const rate=(Date.now()-(s.startedAt||Date.now()))/done; 
+          etaSec=Math.max(0,Math.round(((s.total-done)*rate)/1000)); 
         }
-        this.emit({ ...(this.s as StatusSnapshot), done, sublabel, etaSec, active: true });
+        this.emit({ ...s, done, sublabel, etaSec, active:true });
       },
-      
-      setTotal: (total: number) => {
-        this.emit({ ...(this.s as StatusSnapshot), total, active: true });
+      label:(l:string, sub?:string)=> this.emit({ ...(this.s as StatusSnapshot), label:l, sublabel:sub }),
+      end:()=>{
+        this.emit({ ...(this.s as StatusSnapshot), active:false });
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = window.setTimeout(()=>this.emit(undefined), 1000);
       },
-      
-      label: (label: string, sublabel?: string) => {
-        this.emit({ ...(this.s as StatusSnapshot), label, sublabel, active: true });
-      },
-      
-      cancel: () => {
-        this.emit({ ...(this.s as StatusSnapshot), cancelled: true, active: false });
-      },
-      
-      isCancelled: () => {
-        return this.s?.cancelled ?? false;
-      },
-      
-      end: () => {
-        this.emit({ ...(this.s as StatusSnapshot), active: false });
-        // keep the final bar visible briefly so you can see 100%
-        if (this.timer) window.clearTimeout(this.timer);
-        this.timer = window.setTimeout(() => this.emit(undefined), 1200);
-      },
-      
-      fail: (error: string) => {
-        this.emit({ ...(this.s as StatusSnapshot), active: false, error });
-      }
+      fail:(err:string)=> this.emit({ ...(this.s as StatusSnapshot), active:false, error: err })
     };
   }
 }
