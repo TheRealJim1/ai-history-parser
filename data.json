@@ -1,15 +1,31 @@
 {
   "sources": [
     {
-      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-29",
+      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d-2025-10-30",
+      "vendor": "chatgpt",
+      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d",
+      "addedAt": 1761797937578,
+      "color": "#8bff8b"
+    },
+    {
+      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-30",
       "vendor": "chatgpt",
       "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21",
-      "addedAt": 1761756632019,
-      "color": "#8bff8b"
+      "addedAt": 1761797970621,
+      "color": "#ffa500"
+    },
+    {
+      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-30",
+      "vendor": "chatgpt",
+      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21",
+      "addedAt": 1761798148302,
+      "color": "#8bd0ff"
     }
   ],
   "lastActiveSourceIds": [
-    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-29"
+    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d-2025-10-30",
+    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-30",
+    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-30"
   ],
   "mergeMode": "separate",
   "paneSizes": [

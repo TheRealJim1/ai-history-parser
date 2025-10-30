@@ -17,6 +17,7 @@ import { groupTurns } from "./lib/grouping";
 import { LoadingSpinner, LoadingOverlay, LoadingButton } from "./ui/LoadingSpinner";
 import { ConversationCard } from "./ui/ConversationCard";
 import { MultiSelectToolbar } from "./ui/MultiSelectToolbar";
+import { ConversationsList } from "./ui/ConversationsList";
 import type { FlatMessage, Source, Vendor, SearchFacets, SearchProgress, ParseError } from "./types";
 import type AIHistoryParser from "./main";
 
@@ -396,26 +397,30 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     }
   };
 
-  // Messages for the selected conversations
+  // Messages for the selected conversations (supports single and multi-select)
   const selectedConvMessages = useMemo(() => {
+    // Use the active selection set depending on mode
+    const activeSelection = isMultiSelectMode ? selectedConversations : selectedConvKeys;
+
     console.log("🔄 Filtering messages for selected conversations");
-    console.log("🔄 Selected conv keys:", Array.from(selectedConvKeys));
+    console.log("🔄 Multi-select mode:", isMultiSelectMode);
+    console.log("🔄 Active selected keys:", Array.from(activeSelection));
     console.log("🔄 Total filtered messages:", filteredMessages.length);
-    
-    if (selectedConvKeys.size === 0) {
+
+    if (activeSelection.size === 0) {
       console.log("🔄 No conversations selected, returning empty messages");
       return [] as FlatMessage[];
     }
-    
+
     const selected = filteredMessages
-      .filter(m => selectedConvKeys.has(m.conversationId))
+      .filter(m => activeSelection.has(m.conversationId))
       .sort((a,b) => a.createdAt - b.createdAt);
-    
+
     console.log("🔄 Selected messages:", selected.length);
     console.log("🔄 Sample selected message:", selected[0]);
-    
+
     return selected;
-  }, [filteredMessages, selectedConvKeys]);
+  }, [filteredMessages, isMultiSelectMode, selectedConvKeys, selectedConversations]);
 
   // Group messages into turns for better display
   const selectedConvTurns = useMemo(() => {
@@ -498,7 +503,7 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
   } = usePagination(selectedConvTurns, {
     defaultPageSize: 50, // Fewer turns per page since each turn can contain multiple messages
     persistKey: "aip.pageSize",
-    currentFilterHash: `${filterHash}|conv=${Array.from(selectedConvKeys).sort().join(',')}`
+    currentFilterHash: `${filterHash}|conv=${Array.from(isMultiSelectMode ? selectedConversations : selectedConvKeys).sort().join(',')}`
   });
 
   // Load messages from active sources with comprehensive error handling
@@ -975,44 +980,16 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
           />
           
           <LoadingOverlay isLoading={messagesLoading} text="Loading conversations...">
-            <div className="aip-messages">
-              {pagedConversations.map(g => (
-                <ConversationCard
-                  key={g.key}
-                  conversation={{
-                    convId: g.key,
-                    title: g.title || "(untitled)",
-                    vendor: g.vendor,
-                    msgCount: g.count,
-                    firstTs: g.firstMessage?.createdAt || 0,
-                    lastTs: g.lastMessage?.createdAt || 0
-                  }}
-                  isSelected={isMultiSelectMode ? selectedConversations.has(g.key) : selectedConvKeys.has(g.key)}
-                  isMultiSelectMode={isMultiSelectMode}
-                  onSelect={handleSelectConversation}
-                  onToggle={handleSelectConversation}
-                  isLoading={conversationLoading.has(g.key)}
-                />
-              ))}
-            </div>
+            <ConversationsList
+              conversations={groupedByConversation}
+              selectedConversations={isMultiSelectMode ? selectedConversations : selectedConvKeys}
+              isMultiSelectMode={isMultiSelectMode}
+              onSelectConversation={handleSelectConversation}
+              onToggleConversation={handleSelectConversation}
+              isLoading={messagesLoading}
+            />
           </LoadingOverlay>
 
-          {/* Conversation List Pagination */}
-          {pagedConversations.length > 0 && (
-            <div className="aip-pagination">
-              <Paginator
-                page={convPage}
-                pageCount={convPageCount}
-                pageSize={convPageSize}
-                setPageSize={setConvPageSize}
-                total={convTotal}
-                gotoFirst={convFirst}
-                gotoLast={convLast}
-                next={convNext}
-                prev={convPrev}
-              />
-            </div>
-          )}
         </section>
 
         {/* Center Pane: Selected Conversation Messages + Pagination */}
@@ -1033,19 +1010,23 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
               </div>
             )}
 
-          {selectedConvMessages.length > 0 && (
+            {selectedConvMessages.length > 0 && (
             <div className="aihp-message-detail">
               <div className="aihp-detail-header">
                 <h3>
-                  {selectedConvKeys.size === 1 
-                    ? (selectedConvMessages[0].title || "(untitled)")
-                    : `${selectedConvKeys.size} conversations selected`
+                  {isMultiSelectMode 
+                    ? `${selectedConversations.size} conversations selected`
+                    : selectedConvKeys.size === 1 
+                      ? (selectedConvMessages[0].title || "(untitled)")
+                      : `${selectedConvKeys.size} conversations selected`
                   }
                 </h3>
                 <div className="aihp-detail-meta">
-                  {selectedConvKeys.size === 1 
-                    ? new Date(selectedConvMessages[0].createdAt).toLocaleString()
-                    : `${selectedConvMessages.length} messages from ${selectedConvKeys.size} conversations`
+                  {isMultiSelectMode
+                    ? `${selectedConvMessages.length} messages from ${selectedConversations.size} conversations`
+                    : selectedConvKeys.size === 1 
+                      ? new Date(selectedConvMessages[0].createdAt).toLocaleString()
+                      : `${selectedConvMessages.length} messages from ${selectedConvKeys.size} conversations`
                   }
                 </div>
               </div>
@@ -1116,16 +1097,23 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
             </div>
 
             {/* Selected Conversations Stats */}
-            {(isMultiSelectMode && selectedConversations.size > 0) || (!isMultiSelectMode && selectedConvKeys.size > 0) ? (
+            {((isMultiSelectMode && selectedConversations.size > 0) || (!isMultiSelectMode && selectedConvKeys.size > 0)) ? (
               <>
                 <h4>Selected Conversations</h4>
-                <div className="aip-stats" style={{ backgroundColor: 'var(--aihp-bg-modifier)', padding: '8px', borderRadius: '4px' }}>
-                  <div style={{ color: 'var(--aihp-accent)', fontWeight: 'bold' }}>
-                    {isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size} selected
+                <div className="aip-stats" style={{ backgroundColor: 'var(--aihp-bg-modifier)', padding: '8px', borderRadius: '4px', border: '1px solid var(--aihp-accent)' }}>
+                  <div style={{ color: 'var(--aihp-accent)', fontWeight: 'bold', fontSize: '14px' }}>
+                    {isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size} conversation{(isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size) !== 1 ? 's' : ''} selected
                   </div>
                   <div>Messages: {selectedConvMessages.length.toLocaleString()}</div>
                   <div>Turns: {selectedConvTurns.length.toLocaleString()}</div>
                   <div>Page: {msgPage} / {msgPageCount}</div>
+                  {isMultiSelectMode && (
+                    <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--aihp-bg-modifier)' }}>
+                      <div style={{ fontSize: '12px', color: 'var(--aihp-text-muted)' }}>
+                        Multi-select mode active
+                      </div>
+                    </div>
+                  )}
                 </div>
               </>
             ) : null}
