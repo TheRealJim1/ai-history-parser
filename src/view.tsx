@@ -1,8 +1,18 @@
-﻿import { ItemView, Modal, TAbstractFile, WorkspaceLeaf } from "obsidian";
+﻿import { ItemView, Modal, TAbstractFile, WorkspaceLeaf, TFolder, TFile } from "obsidian";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { parseMultipleSources, searchMessages, highlightText } from "./parser";
-import { detectVendor, generateSourceId, pickColor } from "./settings";
+import { executePythonScript, buildSyncCommand, buildAnnotateCommand, buildExportCommand } from "./utils/scriptRunner";
+import { resolveVaultPath } from "./settings";
+import { safeJson, mapAnnotationRow, type ConversationAnnotation, hasAnyAnnotations } from "./utils/jsonUtils";
+import { exportEdgesOnly } from "./utils/graphExport";
+import { isTestModeEnabled, getOutputFolder, getIngestLimits, getAnnotationLimit, validateModelForBackend } from "./utils/testMode";
+import { runSelfCheck, runSelfCheckAfterAction, type SelfCheckResult } from "./utils/selfCheck";
+import { getSelfCheckContext, setSelfCheckContextProvider, type SelfCheckContext } from "./utils/selfCheckCtl";
+import { SelfCheckPanel } from "./components/SelfCheckPanel";
+import { TestWizard } from "./components/TestWizard";
+import { discoverSubfolders, getSourceLabel, formatSourcePath, type DiscoveredSubfolder } from "./utils/folderDiscovery";
+import { detectVendor, generateSourceId, pickColor, makeSourceLabel, parseExportInfo } from "./settings";
 import { MessageContent } from "./components/ToolBlock";
 import { HeaderProgress } from "./ui/HeaderProgress";
 import { Paginator } from "./components/Paginator";
@@ -13,6 +23,7 @@ import { statusBus } from "./ui/status";
 import GraphControls from "./ui/GraphControls";
 import TestView from "./ui/TestView";
 import { buildConvIndex } from "./lib/convIndex";
+import { aggregateConvTags } from "./lib/tags";
 import { groupTurns } from "./lib/grouping";
 import { LoadingSpinner, LoadingOverlay, LoadingButton } from "./ui/LoadingSpinner";
 import { ConversationCard } from "./ui/ConversationCard";
@@ -27,6 +38,10 @@ import "../styles/tw.css";
 export const VIEW_TYPE = "ai-history-parser-view";
 
 export class ParserView extends ItemView {
+  // Expose handlers for agent macros
+  public handleTestSync?: (sourceId: string) => Promise<void>;
+  public handleTestAnnotate?: () => Promise<void>;
+  public handleTestExport?: () => Promise<void>;
   plugin: AIHistoryParser;
   root?: ReactDOM.Root;
 
@@ -43,7 +58,11 @@ export class ParserView extends ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("aihp-root");
     this.root = ReactDOM.createRoot(this.contentEl);
-    this.root.render(<UI plugin={this.plugin} />);
+    
+    // Version banner for debugging
+    console.info("AIHP View opened - DB-first mode active");
+    
+    this.root.render(<UI plugin={this.plugin} viewInstance={this} />);
   }
 
   async onClose() {
@@ -192,15 +211,24 @@ function HealthCheckPanel({ checks }: { checks: HealthCheck[] }) {
 }
 
 // Main UI Component with SQLite + TanStack Query
-function UI({ plugin }: { plugin: AIHistoryParser }) {
+function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: ParserView }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [pinHeader, setPinHeader] = useState<boolean>(() => {
     const v = localStorage.getItem("aip.pinHeader");
     return v ? v === "1" : true; // default: pinned
   });
-  const [activeSources, setActiveSources] = useState<Set<string>>(
-    new Set(plugin.settings.lastActiveSourceIds)
-  );
+  const [activeSources, setActiveSources] = useState<Set<string>>(() => {
+    const saved = new Set(plugin.settings.lastActiveSourceIds || []);
+    // If no sources are saved as active, auto-activate all sources on first load
+    if (saved.size === 0 && plugin.settings.sources.length > 0) {
+      console.log("🔄 No active sources saved - auto-activating all sources");
+      const allSourceIds = new Set(plugin.settings.sources.map(s => s.id));
+      // Save this immediately
+      plugin.saveSetting('lastActiveSourceIds', Array.from(allSourceIds)).catch(console.error);
+      return allSourceIds;
+    }
+    return saved;
+  });
   const [searchQuery, setSearchQuery] = useState(plugin.settings.lastQuery || "");
   const [facets, setFacets] = useState<SearchFacets>({
     vendor: 'all',
@@ -275,9 +303,38 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
         if (facets.role && facets.role !== 'any' && msg.role !== facets.role) return false;
         if (facets.from && msg.createdAt < new Date(facets.from).getTime()) return false;
         if (facets.to && msg.createdAt > new Date(facets.to).getTime() + 86400000) return false;
+        // Only filter by activeSources if there are active sources selected
+        // If no sources are active, show all messages (don't filter)
         if (activeSources.size > 0 && !activeSources.has(msg.sourceId)) return false;
         return true;
       });
+    }
+    
+    // Safety check: If filtering by activeSources results in 0 messages, show all instead
+    // This prevents "wiping out" conversations when sources don't match
+    if (filtered.length === 0 && activeSources.size > 0 && messages.length > 0) {
+      console.warn(`⚠️ Filtering by activeSources (${Array.from(activeSources).join(', ')}) resulted in 0 messages. Showing all messages instead.`);
+      // Return all messages (only apply other filters like vendor, role, date)
+      if (debouncedQuery.trim()) {
+        // Re-run search without sourceIds filter
+        filtered = rankedMessageSearch(messages, debouncedQuery, facets.regex || false, {
+          vendor: facets.vendor,
+          role: facets.role,
+          from: facets.from ? new Date(facets.from).getTime() : undefined,
+          to: facets.to ? new Date(facets.to).getTime() + 86400000 : undefined,
+          // Don't filter by sourceIds
+        });
+      } else {
+        // Just apply non-source filters
+        filtered = messages.filter(msg => {
+          if (facets.vendor && facets.vendor !== 'all' && msg.vendor !== facets.vendor) return false;
+          if (facets.role && facets.role !== 'any' && msg.role !== facets.role) return false;
+          if (facets.from && msg.createdAt < new Date(facets.from).getTime()) return false;
+          if (facets.to && msg.createdAt > new Date(facets.to).getTime() + 86400000) return false;
+          // Don't filter by activeSources in fallback mode
+          return true;
+        });
+      }
     }
     
     return filtered;
@@ -307,37 +364,82 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     console.log("🔄 After deduplication:", deduplicatedMessages.length, "unique messages");
     
     // Convert FlatMessage to ParsedMsg format for the index builder
+    // Build a map of conversationId -> title for better title resolution
+    const convTitleMap = new Map<string, string>();
+    for (const msg of deduplicatedMessages) {
+      if (msg.title && msg.title !== msg.vendor && !convTitleMap.has(msg.conversationId)) {
+        // Use the title from messages (which comes from the DB)
+        convTitleMap.set(msg.conversationId, msg.title);
+      }
+    }
+    
     const parsedMessages = deduplicatedMessages.map(msg => ({
       id: msg.messageId,
       convId: msg.conversationId, // This is already in the format "vendor:convId"
-      convTitle: msg.title,
+      convTitle: convTitleMap.get(msg.conversationId) || msg.title || "(untitled)",
       role: msg.role as 'user'|'assistant'|'tool'|'system',
       ts: msg.createdAt,
       text: msg.text,
-      vendor: 'CHATGPT' as const
+      vendor: msg.vendor as any || 'CHATGPT' // Use actual vendor from message, not hardcoded
     }));
     
     const index = buildConvIndex(parsedMessages);
     console.log("🔄 Built index with", index.length, "conversations");
     
-    // Convert to the format expected by the UI
-    const result = index.map(conv => ({
-      key: conv.convId, // This is already in the format "vendor:convId"
-      title: conv.title,
-      vendor: conv.vendor,
-      count: conv.msgCount,
-      lastMessage: { createdAt: conv.lastTs } as FlatMessage, // For sorting compatibility
-      firstTs: conv.firstTs,
-      lastTs: conv.lastTs
-    }));
+    // Convert to the format expected by the UI and add tags per conversation
+    const byConvId = new Map<string, { text: string }[]>();
+    const firstMsgByConv = new Map<string, FlatMessage>();
+    for (const m of deduplicatedMessages) {
+      const arr = byConvId.get(m.conversationId) || [];
+      arr.push({ text: m.text });
+      byConvId.set(m.conversationId, arr);
+      if (!firstMsgByConv.has(m.conversationId)) firstMsgByConv.set(m.conversationId, m);
+    }
+
+    const sourceIdToLabel = new Map<string, string>();
+    for (const s of plugin.settings.sources) sourceIdToLabel.set(s.id, s.label || s.id);
+
+    const result = index.map(conv => {
+      // Temporarily disable auto-tagging (dom:/ent:/lang:) to reduce noise.
+      // Keep only batch label so exports remain distinguishable.
+      const tags: string[] = [];
+      const fm = firstMsgByConv.get(conv.convId);
+      const batch = fm ? sourceIdToLabel.get(fm.sourceId) : undefined;
+      if (batch) tags.push(`batch:${batch}`);
+      return {
+        key: conv.convId, // For pagination hook
+        convId: conv.convId, // already in format "vendor:convId"
+        title: conv.title,
+        vendor: conv.vendor,
+        msgCount: conv.msgCount,
+        firstTs: conv.firstTs,
+        lastTs: conv.lastTs,
+        tags
+      };
+    });
     
-    console.log("🔄 First few conversations:", result.slice(0, 3).map(g => ({ 
-      title: g.title, 
-      count: g.count, 
-      vendor: g.vendor,
-      firstTs: new Date(g.firstTs).toLocaleString(),
-      lastTs: new Date(g.lastTs).toLocaleString()
-    })));
+    console.log("🔄 Built conversations:", {
+      total: result.length,
+      sample: result.slice(0, 3).map(g => ({ 
+        title: g.title || "(untitled)", 
+        msgCount: g.msgCount, 
+        vendor: g.vendor,
+        convId: g.convId,
+        key: g.key,
+        firstTs: new Date(g.firstTs).toLocaleString(),
+        lastTs: new Date(g.lastTs).toLocaleString()
+      }))
+    });
+    
+    if (result.length === 0 && filteredMessages.length > 0) {
+      console.error("❌ No conversations built but messages exist! This shouldn't happen.");
+      console.error("Sample messages:", filteredMessages.slice(0, 3).map(m => ({
+        conversationId: m.conversationId,
+        title: m.title,
+        textLength: m.text?.length || 0,
+        uid: m.uid
+      })));
+    }
     
     return result;
   }, [filteredMessages]);
@@ -365,13 +467,56 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     persistKey: "aip.convPageSize",
     currentFilterHash: filterHash
   });
+  
+  // Debug pagination
+  useEffect(() => {
+    console.log("🔄 Pagination Debug:", {
+      groupedByConversationLength: groupedByConversation.length,
+      convTotal,
+      convPage,
+      convPageSize,
+      convPageCount,
+      pagedConversationsLength: pagedConversations.length,
+      firstThreePaged: pagedConversations.slice(0, 3),
+      firstThreeGrouped: groupedByConversation.slice(0, 3)
+    });
+  }, [groupedByConversation.length, convTotal, convPage, convPageSize, convPageCount, pagedConversations.length]);
 
   // Auto-select first conversation if none selected
   useEffect(() => {
     if (selectedConvKeys.size === 0 && pagedConversations.length > 0) {
-      setSelectedConvKeys(new Set([pagedConversations[0].key]));
+      const firstConv = pagedConversations[0];
+      const firstConvId = firstConv?.convId; // Use convId, not key
+      if (firstConvId) {
+        console.log("🔄 Auto-selecting first conversation:", firstConvId, firstConv?.title);
+        setSelectedConvKeys(new Set([firstConvId]));
+      }
     }
   }, [pagedConversations, selectedConvKeys]);
+  
+  // Debug logging for troubleshooting
+  useEffect(() => {
+    console.log("🔄 UI State Debug:", {
+      messagesTotal: messages.length,
+      filteredMessages: filteredMessages.length,
+      conversationsTotal: groupedByConversation.length,
+      conversationsPaged: pagedConversations.length,
+      activeSourcesCount: activeSources.size,
+      activeSources: Array.from(activeSources),
+      availableSources: plugin.settings.sources.map(s => ({ id: s.id, label: s.label })),
+      firstFewConversations: pagedConversations.slice(0, 3).map(c => ({ 
+        key: c.key, 
+        convId: c.convId, 
+        title: c.title,
+        msgCount: c.msgCount
+      })),
+      firstFewMessages: filteredMessages.slice(0, 3).map(m => ({
+        sourceId: m.sourceId,
+        vendor: m.vendor,
+        title: m.title
+      }))
+    });
+  }, [messages.length, filteredMessages.length, groupedByConversation.length, pagedConversations.length, activeSources.size]);
 
   // Handle conversation selection
   const handleConvClick = (convKey: string, ctrlKey: boolean) => {
@@ -506,142 +651,385 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     currentFilterHash: `${filterHash}|conv=${Array.from(isMultiSelectMode ? selectedConversations : selectedConvKeys).sort().join(',')}`
   });
 
-  // Load messages from active sources with comprehensive error handling
-  const loadMessages = useCallback(async () => {
-    console.log("🔄 ===== LOADMESSAGES START =====");
-    console.log("🔄 Starting loadMessages...");
-    console.log("🔄 Plugin:", !!plugin);
-    console.log("🔄 Plugin settings:", plugin?.settings);
-    console.log("🔄 Active sources:", Array.from(activeSources));
-    console.log("🔄 Current status:", status);
-    console.log("🔄 Current error:", error);
-    console.log("🔄 Current messages count:", messages.length);
+  // NOTE: Folder parsing is now disabled - use refreshFromDB instead
+  // All folder parsing code has been removed - plugin now reads from external DB only
+  
+  // Refresh from DB - reads from external database (defined first for loadMessages)
+  const refreshFromDB = useCallback(async () => {
+    const { pythonPipeline } = plugin.settings;
     
-    // Health check before starting
-    const pluginChecks = checkPluginHealth(plugin);
-    if (pluginChecks.some(c => c.status === 'error')) {
-      console.error("❌ Plugin health check failed:", pluginChecks);
-      setError("Plugin health check failed. See console for details.");
-      setStatus("error");
+    if (!pythonPipeline?.dbPath) {
+      setError("Database path not configured");
       return;
     }
 
-    const activeSourcesArray = plugin.settings.sources.filter(s => activeSources.has(s.id));
-    console.log("🔄 Active sources array:", activeSourcesArray);
-    console.log("🔄 Active sources array length:", activeSourcesArray.length);
-    
-    if (activeSourcesArray.length === 0) {
-      console.log("⚠️ No active sources, clearing messages");
-      setMessages([]);
-      setStatus("idle");
-      console.log("🔄 ===== LOADMESSAGES END (NO SOURCES) =====");
-      return;
-    }
-
-    setStatus("loading");
-    setError("");
     setMessagesLoading(true);
-    setMessagesError(null);
-
-    console.log("📊 Starting status bus task...");
-    const task = statusBus.begin("index", "Indexing exports", activeSourcesArray.length);
-    console.log("📊 Status bus task created:", task);
-
+    setStatus("loading");
+    
+    // Initialize progress tracking
+    const progressHandle = statusBus.begin("refresh-db", "Loading from database...");
+    
     try {
-      let completed = 0;
-      const allMessages: FlatMessage[] = [];
-      const allErrors: ParseError[] = [];
+      // Use Python bridge script to query DB and return JSON
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
+      
+      // Check if DB exists first
+      const { spawn } = require("child_process");
+      const fs = require("fs");
+      if (!fs.existsSync(dbPath)) {
+        progressHandle.fail("Database not found");
+        throw new Error(`Database not found: ${dbPath}. Run "Sync from Backups" first.`);
+      }
+      
+      // Create a temporary Python script file to avoid Windows shell issues with multiline strings
+      const os = require("os");
+      const path = require("path");
+      const scriptPath = path.join(os.tmpdir(), `aihp_query_${Date.now()}.py`);
+      
+      const queryScript = `import sqlite3, json, sys
+from datetime import datetime
+db_path = r"${dbPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
+con = sqlite3.connect(db_path)
+cur = con.cursor()
 
-      console.log("🔄 Starting to process sources...");
-      for (const source of activeSourcesArray) {
-        if (task.isCancelled()) {
-          console.log("🔄 Task cancelled, breaking loop");
-          break;
-        }
+# Helper function to convert datetime string to Unix timestamp
+def to_timestamp(dt_str):
+    if not dt_str:
+        return 0
+    try:
+        # Try parsing as datetime string (format: "YYYY-MM-DD HH:MM:SS")
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        # If parsing fails, try as integer (already a timestamp)
+        try:
+            return int(float(dt_str))
+        except (ValueError, TypeError):
+            return 0
 
-        console.log(`📁 ===== PROCESSING SOURCE ${completed + 1}/${activeSourcesArray.length} =====`);
-        console.log(`📁 Processing source: ${source.id} (${source.root})`);
-        console.log("📊 Setting task sublabel...");
-        task.tick(0, source.root.split(/[\\/]/).slice(-2).join("/"));
+# Check if conversation_annotation table exists
+has_annotations = False
+try:
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_annotation'")
+    has_annotations = cur.fetchone() is not None
+except:
+    pass
+
+# Query conversations (with or without annotations)
+if has_annotations:
+    convs = cur.execute("""
+SELECT
+  c.id, c.title, c.provider,
+  COALESCE(c.updated_at, c.created_at) AS ts,
+  COALESCE(a.summary, '')              AS summary,
+  COALESCE(a.tags,    '[]')            AS tags_json,
+  COALESCE(a.topics,  '[]')            AS topics_json,
+  COALESCE(a.entities,'{}')            AS entities_json,
+  COALESCE(a.risk_flags,'[]')          AS risk_json,
+  COALESCE(a.sentiment,'neutral')      AS sentiment
+FROM conversation c
+LEFT JOIN conversation_annotation a
+  ON a.conversation_id = c.id
+ORDER BY ts DESC
+""").fetchall()
+else:
+    # Fallback: no annotations table yet
+    convs = cur.execute("""
+SELECT
+  c.id, c.title, c.provider,
+  COALESCE(c.updated_at, c.created_at) AS ts,
+  '' AS summary,
+  '[]' AS tags_json,
+  '[]' AS topics_json,
+  '{}' AS entities_json,
+  '[]' AS risk_json,
+  'neutral' AS sentiment
+FROM conversation c
+ORDER BY ts DESC
+""").fetchall()
+
+# Query all messages at once (much faster than one query per conversation)
+# Output progress to stderr (will be parsed by TypeScript)
+total_convs = len(convs)
+conv_ids = [c[0] for c in convs]
+sys.stderr.write("PROGRESS:TOTAL:" + str(total_convs) + "\\n")
+sys.stderr.flush()
+
+# Create a map of conversation_id -> (title, provider) for quick lookup
+# SELECT order: id[0], title[1], provider[2]
+conv_map = {c[0]: (c[1] or "", c[2] or "unknown") for c in convs}  # title, provider
+
+# Single query to get all messages for all conversations
+# Use IN clause with placeholders (SQLite supports up to ~500, but we'll batch if needed)
+messages = []
+if len(conv_ids) <= 500:
+    # Single query if under SQLite's practical limit
+    placeholders = ','.join('?' * len(conv_ids))
+    all_msgs = cur.execute(f"SELECT id, conversation_id, idx, role, author, model, created_at, content FROM message WHERE conversation_id IN ({placeholders}) ORDER BY conversation_id, idx", conv_ids).fetchall()
+    
+    processed = 0
+    for msg in all_msgs:
+        conv_id = msg[1]
+        title, provider = conv_map.get(conv_id, ("", "unknown"))  # Fixed: title first, then provider
+        messages.append({
+            "uid": f"{conv_id}:{msg[0]}",
+            "conversationId": str(conv_id),
+            "messageId": str(msg[0]),
+            "role": msg[3] or "unknown",
+            "createdAt": to_timestamp(msg[6]),
+            "text": msg[7] or "",
+            "title": title or "",  # Now correctly using title
+            "vendor": provider or "chatgpt",  # Now correctly using provider
+            "sourceId": provider or "unknown"
+        })
         
-        try {
-          console.log("🔄 Calling parseMultipleSources...");
-          const result = await parseMultipleSources(plugin.app, [source]);
-          console.log(`✅ Parsed ${result.messages.length} messages from ${source.id}`);
-          console.log(`✅ Parse errors: ${result.errors.length}`);
-          
-          // Process messages directly without individual progress tracking
-          console.log("🔄 Processing individual messages...");
-          for (const msg of result.messages) {
-            if (task.isCancelled()) {
-              console.log("🔄 Task cancelled during message processing");
-              break;
+        processed += 1
+        # Update progress every 1000 messages
+        if processed % 1000 == 0:
+            pct = int((processed / len(all_msgs)) * total_convs)
+            sys.stderr.write("PROGRESS:TICK:" + str(pct) + ":" + str(total_convs) + "\\n")
+            sys.stderr.flush()
+    
+    # Final progress update
+    sys.stderr.write("PROGRESS:TICK:" + str(total_convs) + ":" + str(total_convs) + "\\n")
+    sys.stderr.flush()
+else:
+    # Batch if too many conversations (rare case)
+    batch_size = 500
+    processed_convs = 0
+    for i in range(0, len(conv_ids), batch_size):
+        batch = conv_ids[i:i+batch_size]
+        placeholders = ','.join('?' * len(batch))
+        batch_msgs = cur.execute(f"SELECT id, conversation_id, idx, role, author, model, created_at, content FROM message WHERE conversation_id IN ({placeholders}) ORDER BY conversation_id, idx", batch).fetchall()
+        
+        for msg in batch_msgs:
+            conv_id = msg[1]
+            provider, title = conv_map.get(conv_id, ("unknown", ""))
+            messages.append({
+                "uid": f"{conv_id}:{msg[0]}",
+                "conversationId": str(conv_id),
+                "messageId": str(msg[0]),
+                "role": msg[3] or "unknown",
+                "createdAt": to_timestamp(msg[6]),
+                "text": msg[7] or "",
+                "title": title or "",
+                "vendor": provider or "chatgpt",
+                "sourceId": provider or "unknown"
+            })
+        
+        processed_convs += len(batch)
+        sys.stderr.write("PROGRESS:TICK:" + str(processed_convs) + ":" + str(total_convs) + "\\n")
+        sys.stderr.flush()
+
+# Build conversations list with annotation data
+conv_list = []
+for c in convs:
+    conv_list.append({
+        "id": c[0],
+        "title": c[1] or "",  # Fixed: title is at index 1
+        "provider": c[2] or "unknown",  # Fixed: provider is at index 2
+        "ts": c[3],
+        "summary": c[4],
+        "tags_json": c[5],
+        "topics_json": c[6],
+        "entities_json": c[7],
+        "risk_json": c[8],
+        "sentiment": c[9]
+    })
+
+print(json.dumps({"conversations": conv_list, "messages": messages}))
+con.close()
+`;
+      
+      // Write script to temp file
+      fs.writeFileSync(scriptPath, queryScript, 'utf8');
+      
+      // Execute query script from file (more reliable on Windows)
+      // Use shell:false since we're passing args as an array
+      const proc = spawn(pythonPipeline.pythonExecutable, [scriptPath], { shell: false });
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      
+      proc.stderr.on('data', (data: Buffer) => {
+        const text = data.toString();
+        stderr += text;
+        
+        // Parse progress updates from stderr
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('PROGRESS:TOTAL:')) {
+            const total = parseInt(line.split(':')[2], 10);
+            if (!isNaN(total)) {
+              progressHandle.setTotal(total);
+              progressHandle.label("Loading conversations...", `0/${total} conversations`);
             }
-            
-            // Message structure is already validated by the robust parser
-            
-            allMessages.push(msg);
+          } else if (line.startsWith('PROGRESS:TICK:')) {
+            const parts = line.split(':');
+            if (parts.length >= 4) {
+              const current = parseInt(parts[2], 10);
+              const total = parseInt(parts[3], 10);
+              if (!isNaN(current) && !isNaN(total)) {
+                progressHandle.set(current, `${current}/${total} conversations`);
+              }
+            }
+          }
+        }
+      });
+      
+      await new Promise<void>((resolve, reject) => {
+        proc.on('close', (code: number) => {
+          // Clean up temp file
+          try {
+            if (fs.existsSync(scriptPath)) {
+              fs.unlinkSync(scriptPath);
+            }
+          } catch (e) {
+            // Ignore cleanup errors
           }
           
-          console.log(`✅ Finished processing ${result.messages.length} messages from ${source.id}`);
-          allErrors.push(...result.errors);
-        } catch (sourceError: any) {
-          console.error(`❌ Error processing source ${source.id}:`, sourceError);
-          console.error(`❌ Source error details:`, {
-            message: sourceError.message,
-            stack: sourceError.stack,
-            name: sourceError.name
-          });
-          allErrors.push({
-            source: source.root,
-            error: String(sourceError),
-            timestamp: Date.now()
-          });
-        }
-        
-        completed++;
-        console.log(`📁 Completed source ${completed}/${activeSourcesArray.length}`);
-        task.tick(1); // Increment progress
-      }
-
-      console.log(`📊 ===== LOADMESSAGES COMPLETION =====`);
-      console.log(`📊 Loaded ${allMessages.length} messages total`);
-      console.log(`⚠️ ${allErrors.length} errors occurred`);
-
-      if (allErrors.length > 0) {
-        console.warn("Parse errors:", allErrors);
-        setError(`${allErrors.length} errors occurred during parsing`);
-      }
-
-      console.log("🔄 Setting messages state...");
-      setMessages(allMessages);
-      console.log("🔄 Setting status to ready...");
+          if (code === 0) {
+            try {
+              const data = JSON.parse(stdout);
+              
+              // Map provider to source.id for filtering
+              // The Python DB stores provider (e.g., "openai") but plugin sources have unique IDs
+              // Create a map of provider -> source.id(s) - handle multiple sources with same provider
+              const providerToSourceIds = new Map<string, string[]>();
+              for (const source of plugin.settings.sources) {
+                // Detect provider from source (vendor or path)
+                const provider = source.vendor === 'chatgpt' ? 'openai' : 
+                                source.vendor === 'claude' ? 'anthropic' :
+                                source.vendor || 'openai';
+                if (!providerToSourceIds.has(provider)) {
+                  providerToSourceIds.set(provider, []);
+                }
+                providerToSourceIds.get(provider)!.push(source.id);
+              }
+              
+              // Parse messages and map provider to sourceId
+              const flatMessages: FlatMessage[] = data.messages.map((m: any) => {
+                // m.sourceId from DB is actually the provider (e.g., "openai")
+                const provider = m.sourceId || m.vendor || 'openai';
+                
+                // Find matching source IDs for this provider
+                // IMPORTANT: Match ALL sources with this provider, not just the first one
+                // This ensures messages from any ChatGPT folder map to any ChatGPT source
+                const matchingSourceIds = providerToSourceIds.get(provider) || [];
+                
+                // If we have matching sources, use the first one (they're all for the same provider)
+                // If no matching sources, fallback to provider name (will show in UI but not filterable)
+                let sourceId = provider; // Default fallback
+                if (matchingSourceIds.length > 0) {
+                  // IMPORTANT: Always use the FIRST matching source ID for consistency
+                  // This ensures all messages from provider 'openai' get the same sourceId
+                  // regardless of which active sources are selected. Filtering happens later.
+                  sourceId = matchingSourceIds[0];
+                }
+                
+                // Normalize vendor to ensure it's a vendor name, not a title
+                // Vendor should be one of: 'CHATGPT', 'CLAUDE', 'GEMINI', 'GROK'
+                let normalizedVendor: Vendor = 'CHATGPT'; // Default
+                
+                // Extract vendor from provider or existing vendor field
+                const rawVendor = (m.vendor || provider || '').toLowerCase();
+                
+                if (rawVendor.includes('claude') || rawVendor === 'anthropic') {
+                  normalizedVendor = 'CLAUDE';
+                } else if (rawVendor.includes('gemini') || rawVendor === 'google') {
+                  normalizedVendor = 'GEMINI';
+                } else if (rawVendor.includes('grok')) {
+                  normalizedVendor = 'GROK';
+                } else if (rawVendor.includes('chatgpt') || rawVendor === 'openai') {
+                  normalizedVendor = 'CHATGPT';
+                }
+                
+                // Safety check: if vendor looks like a title (has spaces, too long), force to CHATGPT (most common)
+                if (normalizedVendor.length > 20 || normalizedVendor.includes(' ') || normalizedVendor !== normalizedVendor.toUpperCase()) {
+                  normalizedVendor = 'CHATGPT'; // Default for OpenAI exports
+                }
+                
+                return {
+                  uid: m.uid,
+                  vendor: normalizedVendor,
+                  sourceId: sourceId, // Use mapped source ID
+                  conversationId: m.conversationId,
+                  messageId: m.messageId,
+                  role: m.role as 'user'|'assistant'|'tool'|'system',
+                  createdAt: m.createdAt,
+                  title: m.title,
+                  text: m.text,
+                };
+              });
+              
+              // Parse conversations with annotations (safe JSON parsing)
+              const conversations: ConversationAnnotation[] = (data.conversations || []).map((c: any) => 
+                mapAnnotationRow(c)
+              );
+              
+              // Store annotations in a map for quick lookup
+              const annotationMap = new Map<string, ConversationAnnotation>();
+              conversations.forEach(c => annotationMap.set(c.id, c));
+              
+              // Store in state (we'll use this for annotation display)
+              (setMessages as any).__annotations = annotationMap;
+              
+              setMessages(flatMessages);
       setStatus("ready");
-      setMessagesLoading(false);
-      console.log("📊 Ending status bus task...");
-      task.end();
-      console.log("📊 Status bus task ended");
-      console.log("🔄 ===== LOADMESSAGES SUCCESS =====");
+              setError("");
+              progressHandle.end();
+              console.log(`✅ Refreshed ${flatMessages.length} messages from DB, ${conversations.length} conversations with annotations`);
     } catch (e: any) {
-      console.error("❌ ===== LOADMESSAGES FATAL ERROR =====");
-      console.error("❌ Fatal error in loadMessages:", e);
-      console.error("❌ Fatal error details:", {
-        message: e?.message,
-        stack: e?.stack,
-        name: e?.name
+              progressHandle.fail(`Failed to parse DB response: ${e.message}`);
+              reject(new Error(`Failed to parse DB response: ${e.message}`));
+            }
+          } else {
+            progressHandle.fail(`Query script exited with code ${code}`);
+            reject(new Error(`Query script exited with code ${code}. ${stderr || stdout}`));
+          }
+          resolve();
+        });
+        proc.on('error', (error: any) => {
+          progressHandle.fail(`Failed to execute: ${error.message}`);
+          // Clean up temp file on error
+          try {
+            if (fs.existsSync(scriptPath)) {
+              fs.unlinkSync(scriptPath);
+            }
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+          reject(new Error(`Failed to execute query script: ${error.message}`));
+        });
       });
-      setStatus("error");
-      setError(String(e?.message ?? e));
+    } catch (error: any) {
+      progressHandle.fail(error.message);
       setMessagesLoading(false);
-      setMessagesError(String(e?.message ?? e));
-      task.fail(e?.message ?? String(e));
-      console.error("❌ ===== LOADMESSAGES FAILED =====");
+      setStatus("error");
+      setError(error.message);
+      console.error("❌ Refresh failed:", error);
+      setError(`Refresh failed: ${error.message}`);
+      setStatus("error");
+    } finally {
+      setMessagesLoading(false);
     }
-  }, [plugin, activeSources]);
+  }, [plugin]);
 
-  // Add new source
+  // Load messages from database (replaces folder parsing)
+  const loadMessages = useCallback(async () => {
+    // Redirect to refreshFromDB - no more folder parsing
+    console.log("🔄 loadMessages called - redirecting to refreshFromDB");
+    await refreshFromDB();
+  }, [refreshFromDB]);
+
+  // Add new source (parent folder - handles subfolders automatically)
   const addSource = useCallback(async () => {
-    console.log("➕ Adding new source...");
+    console.log("➕ Adding new source (parent folder)...");
     
     try {
       const chosen = await new FolderSuggestModal(plugin).openAndPick();
@@ -650,31 +1038,120 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
         return;
       }
 
-      console.log("📁 Chosen folder:", chosen);
+      console.log("📁 Chosen parent folder (raw):", chosen);
+      
+      // Ensure we have the full vault path (not relative)
+      let vaultPath = chosen;
+      if (vaultPath && !vaultPath.includes(':') && !vaultPath.startsWith('\\')) {
+        // This is a vault path - ensure it's clean
+        vaultPath = vaultPath.replace(/^\/+|\/+$/g, '');
+        console.log("📁 Cleaned vault path:", vaultPath);
+      }
 
+      // Discover subfolders (for display purposes)
+      let subfolders: DiscoveredSubfolder[] = [];
+      try {
+        console.log(`[addSource] Discovering subfolders for: "${vaultPath}"`);
+        subfolders = await discoverSubfolders(plugin.app, vaultPath);
+        console.log(`[addSource] Discovery complete: ${subfolders.length} subfolders found`);
+      } catch (error) {
+        console.error("[addSource] Failed to discover subfolders:", error);
+        // If vault path fails, it might be an external folder - that's OK
+        // Python scripts will discover subfolders during sync
+      }
+      
+      if (subfolders.length > 0) {
+        console.log(`📂 Discovered ${subfolders.length} subfolders:`);
+        subfolders.slice(0, 5).forEach(s => console.log(`  - ${s.name} (${s.path})`));
+        if (subfolders.length > 5) {
+          console.log(`  ... and ${subfolders.length - 5} more`);
+        }
+      } else {
+        console.warn(`📂 No subfolders discovered for: "${vaultPath}"`);
+      }
+
+      // Use parent folder as root (Python scripts will walk recursively)
       const vendor = detectVendor(chosen, '');
       const id = generateSourceId(vendor, chosen);
+      const label = makeSourceLabel(vendor, chosen) + (subfolders.length > 0 ? ` (${subfolders.length} subfolders)` : '');
       const color = pickColor();
 
-      console.log("🏷️ Generated source:", { id, vendor, color });
+      console.log("🏷️ Generated source:", { id, vendor, color, subfolders: subfolders.length });
 
       const newSource: Source = {
         id,
         vendor,
-        root: chosen,
+        root: chosen, // Parent folder path - Python scripts handle subfolders
         addedAt: Date.now(),
-        color
+        color,
+        label
       };
 
+      // Store discovered subfolders in source metadata (for display)
+      (newSource as any).subfolders = subfolders.map(s => s.path);
+
       console.log("💾 Saving new source...");
+      console.log(`💾 Source ID: "${id}"`);
+      console.log(`💾 Current activeSources before: ${Array.from(activeSources)}`);
+      
       const sources = [...plugin.settings.sources, newSource];
       await plugin.saveSetting('sources', sources);
-      await plugin.saveSetting('lastActiveSourceIds', [...activeSources, id]);
+      
+      // Update plugin.settings immediately to reflect changes
+      plugin.settings.sources = sources;
+      
+      // Update active sources - add the new source ID
+      // BUT: Only add to activeSources if there are no messages loaded yet, or if this source matches existing messages
+      // This prevents filtering out all messages when adding a new source
+      const hasMessages = messages.length > 0;
+      const messageSourceIds = new Set(messages.map(m => m.sourceId));
+      
+      let newActiveSources: Set<string>;
+      if (hasMessages) {
+        // If messages exist, check if the new source would match any
+        // For now, map provider to source ID to see if it matches
+        const provider = vendor === 'chatgpt' ? 'openai' : 
+                        vendor === 'claude' ? 'anthropic' :
+                        vendor || 'openai';
+        // Check if any messages have sourceId matching this provider
+        // If new source doesn't match, keep current activeSources (don't add new one)
+        // User can manually activate it after syncing
+        const providerMatches = Array.from(messageSourceIds).some(sid => {
+          // Check if any existing source with same provider is in activeSources
+          return Array.from(activeSources).some(aid => {
+            const existingSource = plugin.settings.sources.find(s => s.id === aid);
+            if (!existingSource) return false;
+            const existingProvider = existingSource.vendor === 'chatgpt' ? 'openai' :
+                                    existingSource.vendor === 'claude' ? 'anthropic' :
+                                    existingSource.vendor || 'openai';
+            return existingProvider === provider;
+          });
+        });
+        
+        if (providerMatches || activeSources.size === 0) {
+          // Only add if it matches provider of existing active sources, or no sources are active
+          newActiveSources = new Set([...activeSources, id]);
+        } else {
+          // Don't auto-add - keep current activeSources
+          newActiveSources = new Set(activeSources);
+          console.log(`⚠️ New source doesn't match existing messages - not auto-activating. Activate manually after syncing.`);
+        }
+      } else {
+        // No messages yet - safe to add
+        newActiveSources = new Set([...activeSources, id]);
+      }
+      
+      await plugin.saveSetting('lastActiveSourceIds', Array.from(newActiveSources));
+      console.log(`💾 Saved active source IDs: ${Array.from(newActiveSources)}`);
       
       console.log("✅ Source saved, updating UI...");
-      setActiveSources(prev => new Set([...prev, id]));
+      setActiveSources(newActiveSources);
+      console.log(`✅ Updated activeSources state: ${Array.from(newActiveSources)}`);
       
-      // The useEffect will automatically trigger loadMessages when activeSources changes
+      const noticeMsg = hasMessages && newActiveSources.size === activeSources.size
+        ? `Added source: ${getSourceLabel(chosen)} (${subfolders.length} subfolders). Sync to load data, then activate.`
+        : `Added source: ${getSourceLabel(chosen)} (${subfolders.length} subfolders discovered)`;
+      new Notice(noticeMsg);
       
     } catch (error) {
       console.error("❌ Error adding source:", error);
@@ -701,60 +1178,549 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     await plugin.saveSetting('lastActiveSourceIds', Array.from(next));
   }, [activeSources, plugin]);
 
-  // Import to SQLite (restored functionality)
-  const importToDb = useCallback(async () => {
-    if (!messages.length) {
-      setError("No messages to import. Please load messages first.");
+  // Sync from Backups - runs Python import script
+  const syncFromBackups = useCallback(async () => {
+    const { pythonPipeline } = plugin.settings;
+    
+    if (!pythonPipeline || !pythonPipeline.dbPath || !pythonPipeline.scriptsRoot) {
+      new Notice("Please configure database and script paths in settings");
+      return;
+    }
+    
+    if (plugin.settings.sources.length === 0) {
+      new Notice("Please add at least one backup source folder");
       return;
     }
 
     setIsImporting(true);
+    setStatus("loading");
+    
+    // Initialize progress tracking
+    const progressHandle = statusBus.begin("sync-backups", "Syncing from backups...");
     
     try {
-      console.log("🗄️ Starting SQLite import...");
+      // Source folders might be absolute paths (for external backups) or vault-relative
+      // IMPORTANT: Python script needs absolute paths, so we resolve all paths
+      // Read active sources from settings (source of truth) instead of state (may be stale)
+      const activeSourceIds = new Set(plugin.settings.lastActiveSourceIds || []);
       
-      // Import the old database functions temporarily
-      const { openDb, upsertBatch, saveDbToVault } = await import("./db");
+      console.log(`[syncFromBackups] Total sources: ${plugin.settings.sources.length}`);
+      console.log(`[syncFromBackups] Active sources from settings: ${Array.from(activeSourceIds)}`);
+      console.log(`[syncFromBackups] Active sources from state: ${Array.from(activeSources)}`);
+      console.log(`[syncFromBackups] All source IDs: ${plugin.settings.sources.map(s => s.id)}`);
       
-      await openDb();
-      upsertBatch(messages);
-      await saveDbToVault(plugin);
+      // IMPORTANT: Process ALL sources to load all backup folders
+      // Active sources are only used for UI filtering, not for syncing
+      // This ensures all backups are processed and deduplicated correctly
+      const sourceFolders = plugin.settings.sources
+        .map(s => {
+          const isActive = activeSourceIds.has(s.id);
+          console.log(`[syncFromBackups] Processing source "${s.id}" (${s.label}): active=${isActive} in UI`);
+          return s;
+        }) // Process all sources, not just active ones
+        .map(s => {
+          let resolvedPath: string;
+          // If path is vault-relative, resolve it; otherwise use as-is (absolute path)
+          if (s.root.includes('<vault>') || (!s.root.includes(':') && !s.root.startsWith('/') && !s.root.startsWith('\\'))) {
+            // Vault-relative path - convert to absolute
+            const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+            resolvedPath = resolveVaultPath(s.root, vaultBasePath);
+            console.log(`📂 Source "${s.label}": vault path "${s.root}" → absolute "${resolvedPath}"`);
+            console.log(`📂 Vault base path: "${vaultBasePath}"`);
+          } else {
+            // Already absolute path
+            resolvedPath = s.root;
+            console.log(`📂 Source "${s.label}": absolute path "${resolvedPath}"`);
+          }
+          return resolvedPath;
+        });
       
-      // Update stats
-      const { getStats } = await import("./db");
-      const stats = getStats();
-      setDbStats(stats);
+      if (sourceFolders.length === 0) {
+        console.warn(`[syncFromBackups] No sources configured!`);
+        new Notice("No sources configured. Please add at least one backup folder.");
+        setIsImporting(false);
+        setStatus("idle");
+        progressHandle.fail("No sources configured");
+        return;
+      }
       
-      console.log("✅ SQLite import completed");
-      setError("");
-    } catch (error) {
-      console.error("❌ Import failed:", error);
-      setError(`Import failed: ${error}`);
+      console.log(`[syncFromBackups] Processing ${sourceFolders.length} source folder(s):`);
+      sourceFolders.forEach((folder, idx) => console.log(`  ${idx + 1}. ${folder}`));
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
+      const mediaDir = resolveVaultPath(pythonPipeline.mediaSourceFolder, vaultBasePath);
+      
+      // Apply test mode limits if enabled
+      const testLimits = isTestModeEnabled(pythonPipeline) 
+        ? getIngestLimits(pythonPipeline) 
+        : undefined;
+      
+      const cmd = buildSyncCommand(
+        pythonPipeline.pythonExecutable,
+        pythonPipeline.scriptsRoot,
+        sourceFolders,
+        dbPath,
+        mediaDir,
+        testLimits
+      );
+      
+      console.log("🚀 Starting sync with command:", cmd.join(' '));
+      
+      await executePythonScript(cmd, "Syncing from backups...", (progress) => {
+        if (progress.status === 'running') {
+          if (progress.total) {
+            progressHandle.setTotal(progress.total);
+            progressHandle.set(progress.progress || 0, `${progress.progress || 0}/${progress.total}`);
+          } else {
+            // Update label with current status
+            progressHandle.label(progress.message || "Syncing from backups...");
+          }
+          setStatus(progress.message || "Syncing from backups...");
+        } else if (progress.status === 'error') {
+          progressHandle.fail(progress.message);
+          setStatus("Error: " + progress.message);
+          setError(progress.message);
+        } else if (progress.status === 'completed') {
+          progressHandle.end();
+          setStatus("Sync complete");
+        }
+      });
+      
+      // Auto-refresh after sync (will show its own progress)
+      await refreshFromDB();
+      
+      // Run self-check after sync
+      const ctx = getSelfCheckContext(); // Now safe - hoisted from controller
+      if (ctx && typeof runSelfCheckAfterAction === "function") {
+        void runSelfCheckAfterAction(ctx, { reason: "post-sync" });
+      }
+      
+      new Notice("Sync complete!");
+    } catch (error: any) {
+      progressHandle.fail(error.message);
+      console.error("❌ Sync failed:", error);
+      setError(`Sync failed: ${error.message}`);
+      setStatus("error");
     } finally {
       setIsImporting(false);
     }
-  }, [messages, plugin]);
-
-  // Load database stats (restored functionality)
+  }, [plugin, refreshFromDB]); // getSelfCheckContext is hoisted, no need in deps
+  
+  // Annotate with AI - runs Python annotation script
+  const annotateWithAI = useCallback(async () => {
+    const { pythonPipeline } = plugin.settings;
+    
+    if (!pythonPipeline?.aiAnnotation?.enabled) {
+      new Notice("AI annotation is disabled in settings");
+      return;
+    }
+    
+    setIsImporting(true);
+    setStatus("loading");
+    
+    try {
+      const { aiAnnotation } = pythonPipeline;
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
+      
+      // Validate model for backend
+      const modelCheck = validateModelForBackend(
+        aiAnnotation.backend,
+        aiAnnotation.model,
+        aiAnnotation.url
+      );
+      
+      if (!modelCheck.valid) {
+        new Notice(`⚠️ ${modelCheck.warning}`, 8000);
+        return;
+      }
+      
+      // Apply test mode limit if enabled
+      const testLimit = isTestModeEnabled(pythonPipeline)
+        ? getAnnotationLimit(pythonPipeline)
+        : undefined;
+      
+      const cmd = buildAnnotateCommand(
+        pythonPipeline.pythonExecutable,
+        pythonPipeline.scriptsRoot,
+        dbPath,
+        aiAnnotation.backend,
+        aiAnnotation.url,
+        aiAnnotation.model,
+        aiAnnotation.batchSize,
+        aiAnnotation.maxChars,
+        testLimit
+      );
+      
+      await executePythonScript(cmd, "Annotating with AI...", (progress) => {
+        if (progress.total) {
+          setStatus(`Annotating... ${progress.progress}/${progress.total}`);
+        }
+      });
+      
+      // Auto-refresh after annotation
+      await refreshFromDB();
+      
+      // Run self-check after annotation
+      const ctx = getSelfCheckContext(); // Now safe - hoisted from controller
+      if (ctx && typeof runSelfCheckAfterAction === "function") {
+        void runSelfCheckAfterAction(ctx, { reason: "post-annotate" });
+      }
+      
+      new Notice("Annotation complete!");
+    } catch (error: any) {
+      console.error("❌ Annotation failed:", error);
+      setError(`Annotation failed: ${error.message}`);
+      setStatus("error");
+    } finally {
+      setIsImporting(false);
+    }
+  }, [plugin, refreshFromDB]); // getSelfCheckContext is hoisted, no need in deps
+  
+  // Export to Markdown - runs Python export script
+  const exportToMarkdown = useCallback(async () => {
+    const { pythonPipeline } = plugin.settings;
+    
+    if (!pythonPipeline) {
+      new Notice("Please configure Python pipeline settings");
+      return;
+    }
+    
+    setIsImporting(true);
+    setStatus("loading");
+    
+    try {
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
+      
+      // Use test mode folder if enabled
+      const outputFolderPath = isTestModeEnabled(pythonPipeline)
+        ? getOutputFolder(pythonPipeline)
+        : pythonPipeline.outputFolder;
+      
+      const outputFolder = resolveVaultPath(
+        outputFolderPath.startsWith('<vault>')
+          ? outputFolderPath
+          : `<vault>/${outputFolderPath}`,
+        vaultBasePath
+      );
+      const mediaSourceFolder = resolveVaultPath(pythonPipeline.mediaSourceFolder, vaultBasePath);
+      
+      const cmd = buildExportCommand(
+        pythonPipeline.pythonExecutable,
+        pythonPipeline.scriptsRoot,
+        dbPath,
+        outputFolder,
+        mediaSourceFolder,
+        pythonPipeline.exportSettings.chunkSize,
+        pythonPipeline.exportSettings.overlap,
+        isTestModeEnabled(pythonPipeline)
+      );
+      
+      await executePythonScript(cmd, "Exporting to Markdown...", (progress) => {
+        if (progress.total) {
+          setStatus(`Exporting... ${progress.progress}/${progress.total}`);
+        }
+      });
+      
+      new Notice(`Export complete! Files in ${pythonPipeline.outputFolder}`);
+      setStatus("ready");
+    } catch (error: any) {
+      console.error("❌ Export failed:", error);
+      setError(`Export failed: ${error.message}`);
+      setStatus("error");
+    } finally {
+      setIsImporting(false);
+    }
+  }, [plugin]);
+  
+  // Export to Graph - creates lightweight graph edges (links only)
+  const exportToGraph = useCallback(async () => {
+    const { pythonPipeline } = plugin.settings;
+    
+    if (!pythonPipeline) {
+      new Notice("Please configure Python pipeline settings");
+      return;
+    }
+    
+    setIsImporting(true);
+    setStatus("loading");
+    
+    try {
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      
+      // Use test mode folder if enabled
+      const outputFolderPath = isTestModeEnabled(pythonPipeline)
+        ? getOutputFolder(pythonPipeline)
+        : pythonPipeline.outputFolder;
+      
+      const historyFolder = resolveVaultPath(
+        outputFolderPath.startsWith('<vault>')
+          ? outputFolderPath
+          : `<vault>/${outputFolderPath}`,
+        vaultBasePath
+      );
+      
+      // Index folder for graph entities/topics
+      const indexFolderPath = pythonPipeline.outputFolder.replace(/[^/]*$/, '') + 'AI-Index';
+      const indexFolder = resolveVaultPath(
+        indexFolderPath.startsWith('<vault>')
+          ? indexFolderPath
+          : `<vault>/${indexFolderPath}`,
+        vaultBasePath
+      );
+      
+      // Get current conversations from filtered messages
+      const conversations = groupedByConversation;
+      
+      // Extract annotation map
+      const annotations = (setMessages as any).__annotations || new Map();
+      
+      // Convert to the format exportEdgesOnly expects (ConversationAnnotation[])
+      const rows = conversations.map(conv => {
+        // Get annotation if available
+        const annotation = annotations.get(conv.convId);
+        
+        // Parse JSON fields if annotation exists
+        const tags = annotation ? safeJson<string[]>(annotation.tags_json || annotation.tags, []) : [];
+        const topics = annotation ? safeJson<string[]>(annotation.topics_json || annotation.topics, []) : [];
+        const entities = annotation ? safeJson<Record<string, string[]>>(annotation.entities_json || annotation.entities, {}) : {};
+        
+        // Convert to ConversationAnnotation format
+        const tsStr = conv.lastTs || conv.firstTs || Date.now();
+        const dateStr = typeof tsStr === 'number' 
+          ? new Date(tsStr).toISOString() 
+          : (typeof tsStr === 'string' ? tsStr : new Date().toISOString());
+        
+        return {
+          id: conv.convId,
+          title: conv.title || 'Untitled',
+          ts: dateStr,
+          provider: conv.vendor || 'unknown',
+          tags,
+          topics,
+          entities,
+        } as any; // Type assertion - exportEdgesOnly will handle the structure
+      });
+      
+      await exportEdgesOnly(plugin.app, rows, {
+        indexFolder,
+        historyFolder,
+      });
+      
+      new Notice(`Graph export complete! Entities/topics in ${indexFolder}`);
+      setStatus("ready");
+    } catch (error: any) {
+      console.error("❌ Graph export failed:", error);
+      setError(`Graph export failed: ${error.message}`);
+      setStatus("error");
+    } finally {
+      setIsImporting(false);
+    }
+  }, [plugin, groupedByConversation, setMessages]);
+  
+  // Self-check state
+  const [selfCheckResult, setSelfCheckResult] = useState<SelfCheckResult | null>(null);
+  const [isRunningSelfCheck, setIsRunningSelfCheck] = useState(false);
+  
+  // Test mode handlers
+  const handleTestSync = useCallback(async (sourceId: string) => {
+    const source = plugin.settings.sources.find(s => s.id === sourceId);
+    if (!source) return;
+    
+    setIsImporting(true);
+    setStatus("loading");
+    
+    try {
+      const { pythonPipeline } = plugin.settings;
+      if (!pythonPipeline) return;
+      
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
+      const mediaDir = resolveVaultPath(pythonPipeline.mediaSourceFolder, vaultBasePath);
+      
+      const testLimits = getIngestLimits(pythonPipeline);
+      
+      const cmd = buildSyncCommand(
+        pythonPipeline.pythonExecutable,
+        pythonPipeline.scriptsRoot,
+        [source.root],
+        dbPath,
+        mediaDir,
+        testLimits
+      );
+      
+      await executePythonScript(cmd, "Test Sync (slice)...", (progress) => {
+        if (progress.total) {
+          setStatus(`Test Sync... ${progress.progress}/${progress.total}`);
+        }
+      });
+      
+      await refreshFromDB();
+      const ctx = getSelfCheckContext();
+      if (ctx && typeof runSelfCheckAfterAction === "function") {
+        void runSelfCheckAfterAction(ctx, { reason: "post-sync" });
+      }
+      
+      new Notice("Test Sync complete!");
+    } catch (error: any) {
+      console.error("❌ Test Sync failed:", error);
+      setError(`Test Sync failed: ${error.message}`);
+      setStatus("error");
+    } finally {
+      setIsImporting(false);
+    }
+  }, [plugin, refreshFromDB]);
+  
+  // Register self-check context provider (prevents TDZ)
+  useEffect(() => {
+    setSelfCheckContextProvider((): SelfCheckContext | null => {
+      const { pythonPipeline } = plugin.settings;
+      if (!pythonPipeline?.dbPath) return null;
+      
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
+      
+      return {
+        setIsRunningSelfCheck,
+        setSelfCheckResult,
+        app: plugin.app,
+        pythonExecutable: pythonPipeline.pythonExecutable,
+        dbPath,
+      };
+    });
+  }, [plugin, setIsRunningSelfCheck, setSelfCheckResult]);
+  
+  const handleTestAnnotate = useCallback(async () => {
+    await annotateWithAI();
+    const ctx = getSelfCheckContext(); // Now safe - hoisted from controller
+    if (ctx && typeof runSelfCheckAfterAction === "function") {
+      void runSelfCheckAfterAction(ctx, { reason: "post-annotate" });
+    }
+  }, [annotateWithAI]);
+  
+  const handleTestExport = useCallback(async () => {
+    await exportToMarkdown();
+    const ctx = getSelfCheckContext(); // Now safe - hoisted from controller
+    if (ctx && typeof runSelfCheckAfterAction === "function") {
+      void runSelfCheckAfterAction(ctx, { reason: "post-export" });
+    }
+  }, [exportToMarkdown]);
+  
+  // Load database stats from external DB
   const loadDbStats = useCallback(async () => {
     try {
-      const { loadDbFromVault, openDb, getStats } = await import("./db");
-      const dbData = await loadDbFromVault(plugin);
-      if (dbData) {
-        await openDb(dbData);
-        const stats = getStats();
-        setDbStats(stats);
+      const { pythonPipeline } = plugin.settings;
+      if (!pythonPipeline?.dbPath) {
+        setDbStats({ totalMessages: 0, totalConversations: 0, sources: 0, lastUpdated: 0 });
+        return;
       }
+      
+      // Query stats from external DB using Python bridge
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
+      const fs = require("fs");
+      if (!fs.existsSync(dbPath)) {
+        setDbStats({ totalMessages: 0, totalConversations: 0, sources: 0, lastUpdated: 0 });
+        return;
+      }
+      
+      // Use temp file for stats query too (Windows compatibility)
+      const os = require("os");
+      const path = require("path");
+      const statsScriptPath = path.join(os.tmpdir(), `aihp_stats_${Date.now()}.py`);
+      
+      const queryScript = `import sqlite3, json
+con = sqlite3.connect(r"${dbPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}")
+cur = con.cursor()
+stats = {
+    "totalConversations": cur.execute("SELECT COUNT(*) FROM conversation").fetchone()[0],
+    "totalMessages": cur.execute("SELECT COUNT(*) FROM message").fetchone()[0],
+    "sources": len(cur.execute("SELECT DISTINCT provider FROM conversation").fetchall()),
+    "lastUpdated": 0
+}
+# Get max updated_at if available
+try:
+    max_updated = cur.execute("SELECT MAX(CAST(updated_at AS INTEGER)) FROM conversation WHERE updated_at IS NOT NULL").fetchone()[0]
+    if max_updated:
+        stats["lastUpdated"] = int(max_updated)
+except:
+    pass
+print(json.dumps(stats))
+con.close()
+`;
+      
+      // Write script to temp file
+      fs.writeFileSync(statsScriptPath, queryScript, 'utf8');
+      
+      const { spawn } = require("child_process");
+      // Use shell:false since we're passing args as an array
+      const proc = spawn(pythonPipeline.pythonExecutable, [statsScriptPath], { shell: false });
+      
+      let stdout = '';
+      proc.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      
+      await new Promise<void>((resolve, reject) => {
+        proc.on('close', (code: number) => {
+          // Clean up temp file
+          try {
+            if (fs.existsSync(statsScriptPath)) {
+              fs.unlinkSync(statsScriptPath);
+            }
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+          
+          if (code === 0) {
+            try {
+              const stats = JSON.parse(stdout);
+              setDbStats({
+                totalMessages: stats.totalMessages || 0,
+                totalConversations: stats.totalConversations || 0,
+                sources: stats.sources || 0,
+                lastUpdated: stats.lastUpdated || 0,
+              });
+            } catch (e) {
+              console.warn("Failed to parse stats:", e);
+            }
+          }
+          resolve();
+        });
+        proc.on('error', (error: any) => {
+          // Clean up temp file on error
+          try {
+            if (fs.existsSync(statsScriptPath)) {
+              fs.unlinkSync(statsScriptPath);
+            }
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+          reject(error);
+        });
+      });
     } catch (error) {
       console.warn("Failed to load database stats:", error);
+      setDbStats({ totalMessages: 0, totalConversations: 0, sources: 0, lastUpdated: 0 });
     }
   }, [plugin]);
 
-  // Load messages when active sources change
+  // Refresh from DB on mount or when DB path changes (not when sources change)
   useEffect(() => {
-    console.log("🔄 useEffect triggered - activeSources changed:", Array.from(activeSources));
-    loadMessages();
-  }, [activeSources]);
+    if (plugin.settings.pythonPipeline?.dbPath) {
+      console.log("🔄 Auto-refreshing from DB on mount or DB path change");
+      console.log("🔄 DB Path:", plugin.settings.pythonPipeline.dbPath);
+      console.log("🔄 Messages state before refresh:", messages.length);
+      refreshFromDB().catch(err => {
+        console.error("❌ Auto-refresh failed:", err);
+        setError(err.message || String(err));
+      });
+    } else {
+      console.warn("⚠️ No DB path configured - skipping auto-refresh");
+      setError("Database path not configured in settings");
+    }
+  }, [refreshFromDB, plugin.settings.pythonPipeline?.dbPath]); // Include refreshFromDB in deps
 
   // Load database stats on mount
   useEffect(() => {
@@ -802,8 +1768,67 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [msgNext, msgPrev]);
 
+  // Expose handlers to view instance for agent macros
+  useEffect(() => {
+    if (viewInstance) {
+      viewInstance.handleTestSync = handleTestSync;
+      viewInstance.handleTestAnnotate = handleTestAnnotate;
+      viewInstance.handleTestExport = handleTestExport;
+    }
+  }, [handleTestSync, handleTestAnnotate, handleTestExport, viewInstance]);
+  
+  // Check if DB exists  
+  const [dbExists, setDbExists] = useState<boolean | null>(null);
+  
+  useEffect(() => {
+    const checkDb = async () => {
+      if (!plugin.settings.pythonPipeline?.dbPath) {
+        setDbExists(false);
+        return;
+      }
+      try {
+        const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+        const dbPath = resolveVaultPath(plugin.settings.pythonPipeline.dbPath, vaultBasePath);
+        const fs = require("fs");
+        setDbExists(fs.existsSync(dbPath));
+        
+        // Run self-check if DB exists
+        if (fs.existsSync(dbPath)) {
+          const ctx = getSelfCheckContext(); // Now safe - hoisted from controller
+          if (ctx && typeof runSelfCheckAfterAction === "function") {
+            void runSelfCheckAfterAction(ctx, { reason: "mount" });
+          }
+        }
+      } catch {
+        setDbExists(false);
+      }
+    };
+    checkDb();
+  }, [plugin.settings.pythonPipeline?.dbPath]); // getSelfCheckContext is hoisted, no need in deps
+
   return (
     <div ref={rootRef} className="aip-root">
+      {/* Database Warning Banner */}
+      {dbExists === false && (
+        <div className="aip-banner aip-banner-warning" style={{padding: '10px', background: 'var(--background-modifier-error)', color: 'var(--text-on-accent)', textAlign: 'center'}}>
+          <strong>⚠️ Database not found</strong> — Run "Sync from Backups" to create it. Path: {plugin.settings.pythonPipeline?.dbPath || 'not configured'}
+        </div>
+      )}
+      
+      {/* Test Mode Wizard */}
+      {isTestModeEnabled(plugin.settings.pythonPipeline!) && (
+        <TestWizard
+          settings={plugin.settings.pythonPipeline!}
+          sources={plugin.settings.sources}
+          onTestSync={handleTestSync}
+          onTestAnnotate={handleTestAnnotate}
+          onTestExport={handleTestExport}
+        />
+      )}
+      
+      {/* Self-Check Panel */}
+      <SelfCheckPanel result={selfCheckResult} isLoading={isRunningSelfCheck} />
+      
       {/* Sticky Header */}
       <header className={`aip-header ${pinHeader ? "is-sticky" : ""}`}>
         <div className="aip-header-row">
@@ -821,18 +1846,52 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
 
           {/* MIDDLE: Primary controls */}
           <div className="aip-header-center">
-            <button className="aihp-btn" onClick={addSource}>Add Source…</button>
-            <button className="aihp-btn primary" onClick={loadMessages}>Load & Index</button>
-            
-            <select 
-              title="Merge mode"
-              value={plugin.settings.mergeMode} 
-              onChange={e => plugin.saveSetting('mergeMode', e.target.value as any)}
+            <button className="aihp-btn" onClick={addSource}>Manage Sources…</button>
+            <button 
+              className="aihp-btn primary" 
+              onClick={syncFromBackups}
+              disabled={isImporting}
             >
-              <option value="separate">View: Separate</option>
-              <option value="chronological">View: Merge (time)</option>
-              <option value="linkOnly">View: Link Only</option>
-            </select>
+              {isImporting ? 'Syncing...' : 'Sync from Backups'}
+            </button>
+            
+            {plugin.settings.pythonPipeline?.aiAnnotation?.enabled && (
+              <button 
+                className="aihp-btn" 
+                onClick={annotateWithAI}
+                disabled={isImporting}
+                title="Annotate conversations with AI"
+              >
+                Annotate with AI
+              </button>
+            )}
+            
+            <button 
+              className="aihp-btn" 
+              onClick={exportToMarkdown}
+              disabled={isImporting}
+              title="Export to Markdown files (full content + images)"
+            >
+              Export to Markdown
+            </button>
+            
+            <button 
+              className="aihp-btn" 
+              onClick={exportToGraph}
+              disabled={isImporting}
+              title="Export graph edges only (lightweight links)"
+            >
+              Export to Graph
+            </button>
+            
+            <button 
+              className="aihp-btn" 
+              onClick={refreshFromDB}
+              disabled={isImporting}
+              title="Refresh UI from database"
+            >
+              Refresh from DB
+            </button>
 
             <input
               className="aihp-input search"
@@ -840,14 +1899,6 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
             />
-
-            <button 
-              className="aihp-btn" 
-              onClick={importToDb}
-              disabled={isImporting || messages.length === 0}
-            >
-              {isImporting ? 'Importing...' : 'Import → SQLite'}
-            </button>
           </div>
 
           {/* RIGHT: Header actions */}
@@ -884,17 +1935,28 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
             <span className="aip-sources-count">{activeSources.size} selected</span>
           </div>
           <div className="aip-chips">
-            {plugin.settings.sources.map(source => (
+            {plugin.settings.sources.map(source => {
+              const fallbackLabel = (()=>{ 
+                const label = source.label || getSourceLabel(source.root);
+                return label;
+              })();
+              const subfolders = (source as any).subfolders || [];
+              return (
               <span
                 key={source.id}
                 className={`aihp-chip ${activeSources.has(source.id) ? 'active' : 'inactive'}`}
                 style={{ borderColor: source.color || '#666' }}
                 onClick={() => toggleSource(source.id)}
-                title={`${source.vendor.toUpperCase()} - ${source.root}`}
+                title={`${fallbackLabel} — ${source.root}${subfolders.length > 0 ? `\n${subfolders.length} subfolders discovered` : ''}`}
               >
-                {source.id}
+                {fallbackLabel}
+                {subfolders.length > 0 && (
+                  <span style={{ fontSize: '0.85em', opacity: 0.7, marginLeft: '4px' }}>
+                    ({subfolders.length})
+                  </span>
+                )}
               </span>
-            ))}
+            );})}
           </div>
         </div>
 
@@ -967,7 +2029,12 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
       ) : (
       <div className="aip-body">
         {/* Left Pane: Conversation List */}
-        <section className="aip-pane aip-left">
+        <section className="aip-pane aip-left" style={{
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          position: 'relative'
+        }}>
           <MultiSelectToolbar
             selectedCount={isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size}
             totalCount={groupedByConversation.length}
@@ -980,15 +2047,50 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
           />
           
           <LoadingOverlay isLoading={messagesLoading} text="Loading conversations...">
-            <ConversationsList
-              conversations={groupedByConversation}
-              selectedConversations={isMultiSelectMode ? selectedConversations : selectedConvKeys}
-              isMultiSelectMode={isMultiSelectMode}
-              onSelectConversation={handleSelectConversation}
-              onToggleConversation={handleSelectConversation}
-              isLoading={messagesLoading}
-            />
+            {(() => {
+              const firstThree = pagedConversations.slice(0, 3);
+              console.log("🔄 Rendering ConversationsList with:", {
+                pagedConversationsLength: pagedConversations.length,
+                firstThreeRaw: firstThree,
+                firstThreeDetails: firstThree.map(c => ({
+                  convId: c?.convId,
+                  title: c?.title,
+                  hasTitle: !!c?.title,
+                  hasConvId: !!c?.convId,
+                  vendor: c?.vendor,
+                  msgCount: c?.msgCount,
+                  allKeys: Object.keys(c || {})
+                })),
+                total: convTotal,
+                page: convPage,
+                pageCount: convPageCount,
+                pageSize: convPageSize
+              });
+              return (
+                <ConversationsList
+                  conversations={pagedConversations}
+                  selectedConversations={isMultiSelectMode ? selectedConversations : selectedConvKeys}
+                  isMultiSelectMode={isMultiSelectMode}
+                  onSelectConversation={handleSelectConversation}
+                  onToggleConversation={handleSelectConversation}
+                  isLoading={messagesLoading}
+                />
+              );
+            })()}
           </LoadingOverlay>
+          
+          {/* Pagination for conversations list */}
+          <Paginator
+            page={convPage}
+            pageCount={convPageCount}
+            pageSize={convPageSize}
+            setPageSize={setConvPageSize}
+            total={convTotal}
+            gotoFirst={convFirst}
+            gotoLast={convLast}
+            next={convNext}
+            prev={convPrev}
+          />
 
         </section>
 
@@ -1122,15 +2224,79 @@ function UI({ plugin }: { plugin: AIHistoryParser }) {
             <div className="aip-vendor-stats">
               {Object.entries(
                 filteredMessages.reduce((acc: Record<string, number>, msg: any) => {
-                  acc[msg.vendor] = (acc[msg.vendor] || 0) + 1;
+                  // Use the normalized vendor field (should always be CHATGPT, CLAUDE, etc.)
+                  // Do NOT use msg.title, msg.sourceId, or any other field - only msg.vendor
+                  const vendorKey = msg.vendor || 'CHATGPT';
+                  
+                  // Only count valid vendor names (uppercase, no spaces)
+                  if (vendorKey && vendorKey.toUpperCase() === vendorKey && !vendorKey.includes(' ')) {
+                    acc[vendorKey] = (acc[vendorKey] || 0) + 1;
+                  }
+                  
                   return acc;
                 }, {} as Record<string, number>)
-              ).map(([vendor, count]) => (
-                <div key={vendor} className="aip-vendor-item">
-                  <span className="aip-vendor-name">{vendor.toUpperCase()}</span>
-                  <span className="aip-vendor-count">{count}</span>
-                </div>
-              ))}
+              )
+              .filter(([vendor]) => {
+                // Only show valid vendor names: CHATGPT, CLAUDE, GEMINI, GROK
+                const validVendors = ['CHATGPT', 'CLAUDE', 'GEMINI', 'GROK'];
+                return validVendors.includes(vendor.toUpperCase());
+              })
+              .sort(([, a], [, b]) => b - a) // Sort by count descending
+              .slice(0, 20) // Limit to top 20
+              .map(([vendor, count]) => {
+                // Map vendor codes to user-friendly names
+                const vendorUpper = vendor.toUpperCase();
+                const vendorDisplay = vendorUpper === 'CHATGPT' ? 'ChatGPT' :
+                                    vendorUpper === 'CLAUDE' ? 'Claude' :
+                                    vendorUpper === 'GEMINI' ? 'Gemini' :
+                                    vendorUpper === 'GROK' ? 'Grok' :
+                                    vendorUpper;
+                
+                const vendorFilter = vendorUpper === 'CHATGPT' ? 'chatgpt' :
+                                   vendorUpper === 'CLAUDE' ? 'claude' :
+                                   vendorUpper === 'GEMINI' ? 'gemini' :
+                                   vendorUpper === 'GROK' ? 'grok' :
+                                   vendorUpper.toLowerCase();
+                
+                return (
+                  <div 
+                    key={vendor} 
+                    className="aip-vendor-item" 
+                    style={{ 
+                      cursor: 'pointer', 
+                      padding: '6px 10px', 
+                      borderRadius: '4px', 
+                      transition: 'background 0.2s',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: '4px',
+                      border: facets.vendor === vendorFilter ? '1px solid var(--aihp-accent)' : '1px solid transparent'
+                    }}
+                    onClick={() => {
+                      // Toggle filter by this vendor
+                      setFacets(prev => ({ 
+                        ...prev, 
+                        vendor: (prev.vendor === vendorFilter) ? 'all' : vendorFilter as any 
+                      }));
+                    }}
+                    onMouseEnter={(e) => {
+                      if (facets.vendor !== vendorFilter) {
+                        (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(255,255,255,0.05)';
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (facets.vendor !== vendorFilter) {
+                        (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent';
+                      }
+                    }}
+                    title={`Click to ${facets.vendor === vendorFilter ? 'clear filter' : 'filter by'} ${vendorDisplay}`}
+                  >
+                    <span className="aip-vendor-name">{vendorDisplay}</span>
+                    <span className="aip-vendor-count">{count.toLocaleString()}</span>
+                  </div>
+                );
+              })}
             </div>
 
 
@@ -1154,34 +2320,165 @@ class FolderSuggestModal extends Modal {
   }
 
   onOpen() {
-    this.titleEl.setText("Pick a folder in this vault");
+    this.titleEl.setText("Pick a parent folder (subfolders will be discovered automatically)");
     const body = this.contentEl.createDiv({ cls: "aihp-modal" });
     const input = body.createEl("input", { 
       type: "text", 
       value: "", 
       cls: "aihp-input",
-      placeholder: "Enter folder path or browse below..."
+      placeholder: "Enter parent folder path (e.g., AI Exports) or browse below..."
     });
     const list = body.createEl("div", { cls: "aihp-folder-list" });
 
-    const folders: string[] = [];
-    const collect = (f: TAbstractFile) => {
-      if ("children" in f) {
-        folders.push(f.path);
-        for (const c of f.children) collect(c);
+    // Gather parent folders that contain backup files (ZIP/JSON/HTML)
+    // Prefer parent-level folders that contain subfolders with exports
+    type Row = { exportRoot:string; date?:string; hint:string; isParent:boolean; depth:number };
+    const rows: Row[] = [];
+    const seen = new Set<string>();
+    
+    const collect = (f: TAbstractFile, depth: number = 0) => {
+      if (f instanceof TFolder) {
+        const path = f.path;
+        const base = path.split('/').pop() || path;
+        const { date } = parseExportInfo(base);
+        
+        // Check for backup files in this folder
+        let hasBackupFiles = false;
+        let backupFileCount = 0;
+        let hasSubfoldersWithBackups = false;
+        
+        for (const c of f.children) {
+          if (c instanceof TFile) {
+            const name = c.name.toLowerCase();
+            if (/\.(zip|json|html)$/i.test(name)) {
+              hasBackupFiles = true;
+              backupFileCount++;
+            }
+          } else if (c instanceof TFolder && depth < 3) {
+            // Check if subfolder has backup files
+            for (const subChild of c.children) {
+              if (subChild instanceof TFile) {
+                const subName = subChild.name.toLowerCase();
+                if (/\.(zip|json|html)$/i.test(subName)) {
+                  hasSubfoldersWithBackups = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        
+        // Prefer parent folders (those with subfolders containing backups)
+        // Only add if:
+        // 1. It's a parent folder with subfolders that have backups, OR
+        // 2. It directly contains backup files and isn't a subfolder of an already-added parent
+        const isParent = hasSubfoldersWithBackups && !hasBackupFiles;
+        const isLeafWithBackups = hasBackupFiles && !hasSubfoldersWithBackups;
+        
+        // Check if this path is a subfolder of an already-added parent
+        const isSubfolderOfParent = rows.some(r => 
+          r.isParent && path.startsWith(r.exportRoot + '/')
+        );
+        
+        // Only add parent folders OR leaf folders that aren't children of a parent
+        // This ensures we only show parent-level folders, not individual child folders
+        if (!seen.has(path) && (isParent || (isLeafWithBackups && !isSubfolderOfParent))) {
+          seen.add(path);
+          // Count ALL subfolders (not just those with backups) for hint
+          let subfolderCount = 0;
+          if (isParent) {
+            // Count all immediate subfolders
+            for (const child of f.children) {
+              if (child instanceof TFolder) {
+                subfolderCount++;
+              }
+            }
+          }
+          const hint = isParent 
+            ? `${subfolderCount} subfolders`
+            : (backupFileCount > 0 ? `${backupFileCount} backup files` : 'backup files');
+          rows.push({ 
+            exportRoot: path, 
+            date, 
+            hint,
+            isParent,
+            depth
+          });
+        }
+        
+        // Recurse (limit depth for performance)
+        if (depth < 3) {
+          for (const c of f.children) {
+            if (c instanceof TFolder) {
+              collect(c, depth + 1);
+            }
+          }
+        }
       }
     };
-    collect(this.app.vault.getRoot());
+    collect(this.app.vault.getRoot(), 0);
 
-    for (const f of folders.filter(Boolean)) {
-      const item = list.createDiv({ text: f, cls: "aihp-folder-item" });
-      item.onClickEvent(() => { input.value = f; });
-    }
+    // Filter out child folders if a parent exists (only show parents)
+    const filteredRows = rows.filter(r => {
+      // Keep parent folders
+      if (r.isParent) return true;
+      // Keep leaf folders only if no parent folder contains them
+      const isChildOfParent = rows.some(p => 
+        p.isParent && r.exportRoot.startsWith(p.exportRoot + '/')
+      );
+      return !isChildOfParent;
+    });
+    
+    // Sort: parent folders first, then by date, then alphabetically
+    filteredRows.sort((a,b)=>{
+      // Parent folders first
+      if (a.isParent && !b.isParent) return -1;
+      if (!a.isParent && b.isParent) return 1;
+      // Then by date
+      if (a.date && b.date) return b.date.localeCompare(a.date);
+      if (a.date) return -1; if (b.date) return 1;
+      // Then alphabetically
+      return a.exportRoot.localeCompare(b.exportRoot);
+    });
+
+    const render = () => {
+      list.empty();
+      const q = (input.value || '').toLowerCase();
+      for (const r of filteredRows) {
+        if (q && !r.exportRoot.toLowerCase().includes(q) && !r.date?.includes(q)) continue;
+        const item = list.createDiv({ cls: "aihp-folder-item compact" });
+        const folderName = r.exportRoot.split('/').pop() || r.exportRoot;
+        const label = r.isParent 
+          ? `📁 ${folderName} (${r.hint})` 
+          : (r.date || folderName);
+        item.setText(label);
+        item.setAttr('title', `${r.exportRoot}${r.isParent ? ' (parent folder - subfolders will be discovered automatically)' : ''}`);
+        item.onClickEvent(() => { 
+          input.value = r.exportRoot;
+          console.log(`[FolderPicker] Selected folder: "${r.exportRoot}" (isParent: ${r.isParent})`);
+        });
+      }
+    };
+
+    input.addEventListener('input', render);
+    render();
 
     const bar = body.createDiv({ cls: "aihp-modal-actions" });
     const ok = bar.createEl("button", { text: "Use folder" });
     const cancel = bar.createEl("button", { text: "Cancel" });
-    ok.onClickEvent(() => { this.picked = input.value.trim(); this.close(); });
+    ok.onClickEvent(() => { 
+      const selectedPath = input.value.trim();
+      // If user clicked a row, use that path; otherwise use typed value
+      // Remove trailing slash (but keep leading slash if it's root)
+      let finalPath = selectedPath.replace(/\/+$/, '');
+      // If empty after trimming slashes, set to empty string (vault root)
+      if (finalPath === '/' || finalPath === '') {
+        finalPath = '';
+      }
+      this.picked = finalPath;
+      console.log(`[FolderPicker] User confirmed path: "${this.picked}"`);
+      this.close(); 
+    });
     cancel.onClickEvent(() => { this.picked = null; this.close(); });
   }
 

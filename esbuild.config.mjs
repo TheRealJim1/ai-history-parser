@@ -20,8 +20,8 @@ const options = {
   },
   // Handle SQL.js dependencies
   resolveExtensions: ['.tsx', '.ts', '.js', '.jsx'],
-  // External modules that SQL.js tries to use
-  external: ['obsidian', 'fs', 'path', 'crypto'],
+  // External modules that SQL.js tries to use (Node.js built-ins available in Obsidian)
+  external: ['obsidian', 'fs', 'path', 'crypto', 'child_process'],
   // Polyfills for Node.js modules
   banner: {
     js: `

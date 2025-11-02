@@ -11,6 +11,42 @@ export const DEFAULT_SETTINGS: ParserSettings = {
   // Legacy support
   exportFolder: "",
   recentFolders: [],
+  // Python Pipeline defaults
+  pythonPipeline: {
+    dbPath: "C:\\Dev\\ai-history-parser\\ai_history.db",
+    pythonExecutable: "python",
+    scriptsRoot: "C:\\Dev\\ai-history-parser",
+    mediaSourceFolder: "C:\\Dev\\ai-history-parser\\media",
+    outputFolder: "AI-History",
+    stagingFolder: "AI-Staging",
+    aiAnnotation: {
+      enabled: false,
+      backend: 'ollama',
+      url: "http://127.0.0.1:11434",
+      model: "llama3.2:3b-instruct",
+      batchSize: 100,
+      maxChars: 8000,
+      autoAnnotate: false,
+    },
+    exportSettings: {
+      chunkSize: 20000,
+      overlap: 500,
+      linkCloud: true,
+      addHashtags: true,
+    },
+    testMode: {
+      enabled: false,
+      stagingFolder: "AI-Staging",
+      ingestLimits: {
+        maxSources: 1,
+        maxFiles: 20,
+        maxConversations: 25,
+        sinceDays: 90,
+      },
+      annotationLimit: 20,
+      autoRebuildOmnisearch: false,
+    },
+  },
 };
 
 export function validateFolderPath(path: string): { isValid: boolean; error?: string } {
@@ -51,10 +87,28 @@ export function detectVendor(folderName: string, id: string): Vendor {
   return 'chatgpt';
 }
 
+// Extract export date/time from a ChatGPT-style folder path.
+// Examples:
+//  "1b25f0...-2025-02-08-10-50-49-029b0220..." => { date: "2025-02-08", time: "10-50-49" }
+//  "chatgpt-2023-05-26-02-27-02" => { date: "2023-05-26", time: "02-27-02" }
+export function parseExportInfo(folderName: string): { date?: string; time?: string } {
+  const base = folderName.split('/').pop() || folderName;
+  const m = base.match(/(20\d{2}-\d{2}-\d{2})(?:[-_](\d{2}-\d{2}-\d{2}))?/);
+  if (m) return { date: m[1], time: m[2] };
+  return {};
+}
+
 export function generateSourceId(vendor: Vendor, folderName: string): string {
-  const timestamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const cleanName = folderName.replace(/[^a-zA-Z0-9\-_]/g, '-').toLowerCase();
-  return `${vendor}-${cleanName}-${timestamp}`;
+  const { date } = parseExportInfo(folderName);
+  const d = date || new Date().toISOString().slice(0, 10);
+  return `${vendor}-${d}`;
+}
+
+// Human label like "ChatGPT 2025-02-08" used in chips and tags
+export function makeSourceLabel(vendor: Vendor, folderName: string): string {
+  const { date } = parseExportInfo(folderName);
+  const vendorTitle = vendor.charAt(0).toUpperCase() + vendor.slice(1);
+  return `${vendorTitle} ${date || new Date().toISOString().slice(0,10)}`;
 }
 
 export function pickColor(): string {
@@ -89,5 +143,30 @@ export function migrateLegacySettings(legacy: any): ParserSettings {
     settings.recentFolders = legacy.recentFolders;
   }
   
+  // Ensure pythonPipeline exists (backward compatibility)
+  if (!settings.pythonPipeline) {
+    settings.pythonPipeline = DEFAULT_SETTINGS.pythonPipeline!;
+  }
+  
+  // Migrate legacy dbPath if present
+  if (legacy.dbPath && typeof legacy.dbPath === 'string' && !settings.pythonPipeline.dbPath) {
+    settings.pythonPipeline.dbPath = legacy.dbPath;
+  }
+  
   return settings;
+}
+
+export function resolveVaultPath(path: string, vaultBasePath: string): string {
+  // Resolve <vault> token to actual vault path
+  let resolved = path.replace(/<vault>/g, vaultBasePath);
+  
+  // If path is vault-relative (no drive letter, no leading slash), prepend vault base
+  // This handles paths like "AI Exports/ChatGPT" -> "C:/Vault/AI Exports/ChatGPT"
+  if (resolved === path && !resolved.includes(':') && !resolved.startsWith('\\') && !resolved.startsWith('/')) {
+    // It's a vault-relative path without <vault> token
+    const pathModule = require("path");
+    resolved = pathModule.join(vaultBasePath, resolved);
+  }
+  
+  return resolved;
 }

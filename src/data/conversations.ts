@@ -33,3 +33,9 @@ export function buildConversationIndex(messages: Msg[]): ConvRow[] {
   return [...map.values()].sort((a,b)=> b.lastTs - a.lastTs);
 }
 
+
+
+
+
+
+

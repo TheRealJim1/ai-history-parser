@@ -12,6 +12,9 @@ export default class AIHistoryParser extends Plugin {
   private statusItem?: HTMLElement;
 
   async onload() {
+    // Version banner for debugging
+    console.info("AIHP DB-first v0.9.99 loaded - Test Mode + Agent Macros enabled");
+    
     // Load and migrate settings
     const loadedData = await this.loadData();
     this.settings = migrateLegacySettings(loadedData);
@@ -118,6 +121,93 @@ export default class AIHistoryParser extends Plugin {
         
         console.log("✅ Test source added");
         new Notice("Test source added - check if it appears in the UI");
+      }
+    });
+
+    // Agent Macros - one-click test commands for Cursor agent
+    this.addCommand({
+      id: "aihp-agent-test-sync",
+      name: "Agent: Test Sync (slice)",
+      callback: async () => {
+        const { pythonPipeline } = this.settings;
+        if (!pythonPipeline?.testMode?.enabled) {
+          new Notice("⚠️ Test Mode must be enabled in settings");
+          return;
+        }
+        
+        if (this.settings.sources.length === 0) {
+          new Notice("❌ No sources configured. Add a source first.");
+          return;
+        }
+        
+        const source = this.settings.sources[0]; // Use first source for test
+        const leaf = this.app.workspace.getLeavesOfType("ai-history-parser-view")[0];
+        if (leaf) {
+          const view = leaf.view as any;
+          if (view.handleTestSync) {
+            await view.handleTestSync(source.id);
+            new Notice("✅ Test Sync complete - check results");
+          } else {
+            new Notice("⚠️ Test Sync handler not available");
+          }
+        } else {
+          new Notice("⚠️ Please open the AI History Parser view first");
+        }
+      }
+    });
+
+    this.addCommand({
+      id: "aihp-agent-test-annotate",
+      name: "Agent: Test Annotate (20)",
+      callback: async () => {
+        const { pythonPipeline } = this.settings;
+        if (!pythonPipeline?.testMode?.enabled) {
+          new Notice("⚠️ Test Mode must be enabled in settings");
+          return;
+        }
+        
+        if (!pythonPipeline?.aiAnnotation?.enabled) {
+          new Notice("⚠️ AI Annotation must be enabled in settings");
+          return;
+        }
+        
+        const leaf = this.app.workspace.getLeavesOfType("ai-history-parser-view")[0];
+        if (leaf) {
+          const view = leaf.view as any;
+          if (view.handleTestAnnotate) {
+            await view.handleTestAnnotate();
+            new Notice("✅ Test Annotate complete - check results");
+          } else {
+            new Notice("⚠️ Test Annotate handler not available");
+          }
+        } else {
+          new Notice("⚠️ Please open the AI History Parser view first");
+        }
+      }
+    });
+
+    this.addCommand({
+      id: "aihp-agent-test-export",
+      name: "Agent: Test Export (Staging)",
+      callback: async () => {
+        const { pythonPipeline } = this.settings;
+        if (!pythonPipeline?.testMode?.enabled) {
+          new Notice("⚠️ Test Mode must be enabled in settings");
+          return;
+        }
+        
+        const leaf = this.app.workspace.getLeavesOfType("ai-history-parser-view")[0];
+        if (leaf) {
+          const view = leaf.view as any;
+          if (view.handleTestExport) {
+            await view.handleTestExport();
+            new Notice(`✅ Test Export complete - check ${pythonPipeline.testMode.stagingFolder}`);
+          } else {
+            new Notice("⚠️ Test Export handler not available");
+          }
+        } else {
+          new Notice("⚠️ Please open the AI History Parser view first");
+        }
       }
     });
 
@@ -267,8 +357,8 @@ class AHPSettingsTab extends PluginSettingTab {
     if (this.plugin.settings.sources.length > 0) {
       this.plugin.settings.sources.forEach((source, index) => {
         const setting = new Setting(containerEl)
-          .setName(`${source.vendor.toUpperCase()} - ${source.id}`)
-          .setDesc(`Path: ${source.root}`)
+          .setName(`${(source.label || source.vendor.toUpperCase())}`)
+          .setDesc(`ID: ${source.id}  •  Path: ${source.root}`)
           .addColorPicker(color => color
             .setValue(source.color || '#8bd0ff')
             .onChange(async (value) => {
@@ -347,6 +437,215 @@ class AHPSettingsTab extends PluginSettingTab {
           }
         }));
 
+    // Python Pipeline Configuration
+    containerEl.createEl('h3', { text: 'Python Pipeline Configuration' });
+    
+    // Ensure pythonPipeline exists
+    if (!this.plugin.settings.pythonPipeline) {
+      this.plugin.settings.pythonPipeline = DEFAULT_SETTINGS.pythonPipeline!;
+    }
+    
+    const pp = this.plugin.settings.pythonPipeline;
+    
+    // Database Path
+    new Setting(containerEl)
+      .setName('Database Path')
+      .setDesc('SQLite database path (supports <vault> token for vault-relative paths)')
+      .addText(text => text
+        .setPlaceholder('C:\\Dev\\ai-history-parser\\ai_history.db')
+        .setValue(pp.dbPath)
+        .onChange(async (value) => {
+          pp.dbPath = value;
+          await this.plugin.saveSettings();
+        }));
+    
+    // Python Executable
+    new Setting(containerEl)
+      .setName('Python Executable')
+      .setDesc('Path to python.exe (or "python" if in PATH)')
+      .addText(text => text
+        .setPlaceholder('python')
+        .setValue(pp.pythonExecutable)
+        .onChange(async (value) => {
+          pp.pythonExecutable = value;
+          await this.plugin.saveSettings();
+        }));
+    
+    // Scripts Root
+    new Setting(containerEl)
+      .setName('Scripts Root')
+      .setDesc('Folder containing Python scripts (ai_history_to_sqlite_images.py, etc.)')
+      .addText(text => text
+        .setPlaceholder('C:\\Dev\\ai-history-parser')
+        .setValue(pp.scriptsRoot)
+        .onChange(async (value) => {
+          pp.scriptsRoot = value;
+          await this.plugin.saveSettings();
+        }));
+    
+    // Media Source Folder
+    new Setting(containerEl)
+      .setName('Media Source Folder')
+      .setDesc('Source media directory (where images are extracted and deduped)')
+      .addText(text => text
+        .setPlaceholder('C:\\Dev\\ai-history-parser\\media')
+        .setValue(pp.mediaSourceFolder)
+        .onChange(async (value) => {
+          pp.mediaSourceFolder = value;
+          await this.plugin.saveSettings();
+        }));
+    
+    // Output Folder
+    new Setting(containerEl)
+      .setName('Output Folder')
+      .setDesc('Vault-relative folder for exported Markdown files')
+      .addText(text => text
+        .setPlaceholder('AI-History')
+        .setValue(pp.outputFolder)
+        .onChange(async (value) => {
+          pp.outputFolder = value;
+          await this.plugin.saveSettings();
+        }));
+    
+    // AI Annotation Section
+    containerEl.createEl('h4', { text: 'AI Annotation (Optional)' });
+    
+    new Setting(containerEl)
+      .setName('Enable AI Annotation')
+      .setDesc('Automatically tag and summarize conversations using local LLM')
+      .addToggle(toggle => toggle
+        .setValue(pp.aiAnnotation.enabled)
+        .onChange(async (value) => {
+          pp.aiAnnotation.enabled = value;
+          await this.plugin.saveSettings();
+          this.display(); // Refresh to show/hide annotation settings
+        }));
+    
+    if (pp.aiAnnotation.enabled) {
+      new Setting(containerEl)
+        .setName('Backend')
+        .setDesc('LLM backend: Ollama or LM Studio (OpenAI-compatible)')
+        .addDropdown(dropdown => dropdown
+          .addOption('ollama', 'Ollama')
+          .addOption('openai', 'LM Studio / OpenAI-compatible')
+          .setValue(pp.aiAnnotation.backend)
+          .onChange(async (value) => {
+            pp.aiAnnotation.backend = value as 'ollama' | 'openai';
+            await this.plugin.saveSettings();
+          }));
+      
+      new Setting(containerEl)
+        .setName('API URL')
+        .setDesc('Base URL for LLM API')
+        .addText(text => text
+          .setPlaceholder('http://127.0.0.1:11434')
+          .setValue(pp.aiAnnotation.url)
+          .onChange(async (value) => {
+            pp.aiAnnotation.url = value;
+            await this.plugin.saveSettings();
+          }));
+      
+      new Setting(containerEl)
+        .setName('Model')
+        .setDesc('Model name (e.g., llama3.2:3b-instruct)')
+        .addText(text => text
+          .setPlaceholder('llama3.2:3b-instruct')
+          .setValue(pp.aiAnnotation.model)
+          .onChange(async (value) => {
+            pp.aiAnnotation.model = value;
+            await this.plugin.saveSettings();
+          }));
+      
+      new Setting(containerEl)
+        .setName('Batch Size')
+        .setDesc('Number of conversations to annotate per batch')
+        .addText(text => text
+          .setPlaceholder('100')
+          .setValue(pp.aiAnnotation.batchSize.toString())
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (!isNaN(num) && num > 0) {
+              pp.aiAnnotation.batchSize = num;
+              await this.plugin.saveSettings();
+            }
+          }));
+      
+      new Setting(containerEl)
+        .setName('Max Characters')
+        .setDesc('Maximum characters per conversation sent to model')
+        .addText(text => text
+          .setPlaceholder('8000')
+          .setValue(pp.aiAnnotation.maxChars.toString())
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (!isNaN(num) && num > 0) {
+              pp.aiAnnotation.maxChars = num;
+              await this.plugin.saveSettings();
+            }
+          }));
+      
+      new Setting(containerEl)
+        .setName('Auto-annotate on Sync')
+        .setDesc('Automatically annotate after syncing from backups')
+        .addToggle(toggle => toggle
+          .setValue(pp.aiAnnotation.autoAnnotate)
+          .onChange(async (value) => {
+            pp.aiAnnotation.autoAnnotate = value;
+            await this.plugin.saveSettings();
+          }));
+    }
+    
+    // Export Settings Section
+    containerEl.createEl('h4', { text: 'Export Settings' });
+    
+    new Setting(containerEl)
+      .setName('Chunk Size')
+      .setDesc('Characters per Markdown chunk')
+      .addText(text => text
+        .setPlaceholder('20000')
+        .setValue(pp.exportSettings.chunkSize.toString())
+        .onChange(async (value) => {
+          const num = parseInt(value);
+          if (!isNaN(num) && num > 0) {
+            pp.exportSettings.chunkSize = num;
+            await this.plugin.saveSettings();
+          }
+        }));
+    
+    new Setting(containerEl)
+      .setName('Overlap')
+      .setDesc('Character overlap between chunks')
+      .addText(text => text
+        .setPlaceholder('500')
+        .setValue(pp.exportSettings.overlap.toString())
+        .onChange(async (value) => {
+          const num = parseInt(value);
+          if (!isNaN(num) && num > 0) {
+            pp.exportSettings.overlap = num;
+            await this.plugin.saveSettings();
+          }
+        }));
+    
+    new Setting(containerEl)
+      .setName('Link Cloud')
+      .setDesc('Generate link cloud in exported notes')
+      .addToggle(toggle => toggle
+        .setValue(pp.exportSettings.linkCloud)
+        .onChange(async (value) => {
+          pp.exportSettings.linkCloud = value;
+          await this.plugin.saveSettings();
+        }));
+    
+    new Setting(containerEl)
+      .setName('Add Hashtags')
+      .setDesc('Add hashtags from annotations to exported notes')
+      .addToggle(toggle => toggle
+        .setValue(pp.exportSettings.addHashtags)
+        .onChange(async (value) => {
+          pp.exportSettings.addHashtags = value;
+          await this.plugin.saveSettings();
+        }));
+
     // Legacy support
     containerEl.createEl('h3', { text: 'Legacy Settings' });
     
@@ -368,8 +667,121 @@ class AHPSettingsTab extends PluginSettingTab {
           }
         }));
 
+    // Test Mode Section
+    containerEl.createEl('h3', { text: 'Test Mode' });
+    
+    if (!pp.testMode) {
+      pp.testMode = DEFAULT_SETTINGS.pythonPipeline!.testMode!;
+    }
+    
+    new Setting(containerEl)
+      .setName('Enable Test Mode')
+      .setDesc('Run everything against Staging with limits for quick testing')
+      .addToggle(toggle => toggle
+        .setValue(pp.testMode!.enabled)
+        .onChange(async (value) => {
+          pp.testMode!.enabled = value;
+          await this.plugin.saveSettings();
+          this.display(); // Refresh to show/hide test mode settings
+        }));
+    
+    if (pp.testMode!.enabled) {
+      new Setting(containerEl)
+        .setName('Staging Folder')
+        .setDesc('Vault-relative folder for test exports (excluded from Omnisearch)')
+        .addText(text => text
+          .setPlaceholder('AI-Staging')
+          .setValue(pp.testMode!.stagingFolder)
+          .onChange(async (value) => {
+            pp.testMode!.stagingFolder = value;
+            await this.plugin.saveSettings();
+          }));
+      
+      containerEl.createEl('h4', { text: 'Ingest Limits' });
+      
+      new Setting(containerEl)
+        .setName('Max Sources')
+        .setDesc('Maximum number of source folders to process')
+        .addText(text => text
+          .setPlaceholder('1')
+          .setValue(pp.testMode!.ingestLimits.maxSources.toString())
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (!isNaN(num) && num > 0) {
+              pp.testMode!.ingestLimits.maxSources = num;
+              await this.plugin.saveSettings();
+            }
+          }));
+      
+      new Setting(containerEl)
+        .setName('Max Files')
+        .setDesc('Maximum number of files to process')
+        .addText(text => text
+          .setPlaceholder('20')
+          .setValue(pp.testMode!.ingestLimits.maxFiles.toString())
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (!isNaN(num) && num > 0) {
+              pp.testMode!.ingestLimits.maxFiles = num;
+              await this.plugin.saveSettings();
+            }
+          }));
+      
+      new Setting(containerEl)
+        .setName('Max Conversations')
+        .setDesc('Maximum number of conversations to import')
+        .addText(text => text
+          .setPlaceholder('25')
+          .setValue(pp.testMode!.ingestLimits.maxConversations.toString())
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (!isNaN(num) && num > 0) {
+              pp.testMode!.ingestLimits.maxConversations = num;
+              await this.plugin.saveSettings();
+            }
+          }));
+      
+      new Setting(containerEl)
+        .setName('Since Days (optional)')
+        .setDesc('Only process conversations from the last N days')
+        .addText(text => text
+          .setPlaceholder('90')
+          .setValue(pp.testMode!.ingestLimits.sinceDays?.toString() || '')
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (value === '' || (!isNaN(num) && num > 0)) {
+              pp.testMode!.ingestLimits.sinceDays = value === '' ? undefined : num;
+              await this.plugin.saveSettings();
+            }
+          }));
+      
+      new Setting(containerEl)
+        .setName('Annotation Limit')
+        .setDesc('Maximum conversations to annotate in test mode')
+        .addText(text => text
+          .setPlaceholder('20')
+          .setValue(pp.testMode!.annotationLimit.toString())
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (!isNaN(num) && num > 0) {
+              pp.testMode!.annotationLimit = num;
+              await this.plugin.saveSettings();
+            }
+          }));
+      
+      new Setting(containerEl)
+        .setName('Auto Rebuild Omnisearch')
+        .setDesc('Automatically rebuild Omnisearch index after export (disabled during testing)')
+        .addToggle(toggle => toggle
+          .setValue(pp.testMode!.autoRebuildOmnisearch)
+          .onChange(async (value) => {
+            pp.testMode!.autoRebuildOmnisearch = value;
+            await this.plugin.saveSettings();
+          }));
+    }
+
     containerEl.createEl('div', { 
-      text: '💡 Tip: Use the main view to add multiple sources and manage your AI conversation exports.',
+      text: '💡 Tip: Add backup source folders in the main view, then use "Sync from Backups" to import data. The plugin reads from the database, not directly from folders.',
       cls: 'setting-item-description',
       attr: { style: 'margin-top: 20px; padding: 10px; background: var(--background-secondary); border-radius: 6px;' }
     });

@@ -1,32 +1,6 @@
 {
-  "sources": [
-    {
-      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d-2025-10-30",
-      "vendor": "chatgpt",
-      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d",
-      "addedAt": 1761797937578,
-      "color": "#8bff8b"
-    },
-    {
-      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-30",
-      "vendor": "chatgpt",
-      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21",
-      "addedAt": 1761797970621,
-      "color": "#ffa500"
-    },
-    {
-      "id": "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-30",
-      "vendor": "chatgpt",
-      "root": "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21",
-      "addedAt": 1761798148302,
-      "color": "#8bd0ff"
-    }
-  ],
-  "lastActiveSourceIds": [
-    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d-2025-10-30",
-    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-30",
-    "chatgpt-1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2023-11-06-13-24-21-2025-10-30"
-  ],
+  "sources": [],
+  "lastActiveSourceIds": [],
   "mergeMode": "separate",
   "paneSizes": [
     32,
@@ -38,5 +12,40 @@
   "exportFolder": "",
   "recentFolders": [
     "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d"
-  ]
+  ],
+  "pythonPipeline": {
+    "dbPath": "C:\\Dev\\ai-history-parser\\ai_history.db",
+    "pythonExecutable": "python",
+    "scriptsRoot": "C:\\Dev\\ai-history-parser",
+    "mediaSourceFolder": "C:\\Dev\\ai-history-parser\\media",
+    "outputFolder": "AI-History",
+    "stagingFolder": "AI-Staging",
+    "aiAnnotation": {
+      "enabled": false,
+      "backend": "ollama",
+      "url": "http://127.0.0.1:11434",
+      "model": "llama3.2:3b-instruct",
+      "batchSize": 100,
+      "maxChars": 8000,
+      "autoAnnotate": false
+    },
+    "exportSettings": {
+      "chunkSize": 20000,
+      "overlap": 500,
+      "linkCloud": true,
+      "addHashtags": true
+    },
+    "testMode": {
+      "enabled": false,
+      "stagingFolder": "AI-Staging",
+      "ingestLimits": {
+        "maxSources": 1,
+        "maxFiles": 20,
+        "maxConversations": 25,
+        "sinceDays": 90
+      },
+      "annotationLimit": 20,
+      "autoRebuildOmnisearch": false
+    }
+  }
 }

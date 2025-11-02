@@ -117,18 +117,70 @@ export class DatabaseService {
     role?: string;
     dateFrom?: number;
     dateTo?: number;
+    useHybrid?: boolean;
+    alpha?: number;
+    beta?: number;
   }): Promise<FlatMessage[]> {
-    // TODO: Implement SQL-based search for better performance
     const allMessages = await this.getMessages(filters.sourceIds);
     
-    return allMessages.filter(msg => {
+    // Apply filters first
+    let filtered = allMessages.filter(msg => {
       if (filters.vendor && msg.vendor !== filters.vendor) return false;
       if (filters.role && msg.role !== filters.role) return false;
       if (filters.dateFrom && msg.createdAt < filters.dateFrom) return false;
       if (filters.dateTo && msg.createdAt > filters.dateTo) return false;
-      if (query && !msg.text.toLowerCase().includes(query.toLowerCase())) return false;
       return true;
     });
+
+    // If no query, return filtered results
+    if (!query || query.trim().length === 0) {
+      return filtered;
+    }
+
+    // Use hybrid search if enabled and embeddings available
+    if (filters.useHybrid) {
+      try {
+        const { hybridSearch } = await import('../lib/vectorSearch');
+        const { toSearchDoc, messageToSearchDoc } = await import('../lib/score');
+        const { generateDocumentEmbeddings } = await import('../lib/vectorSearch');
+        
+        // Convert messages to search documents
+        const docs = filtered.map(msg => messageToSearchDoc(msg));
+        
+        // Get embeddings from database
+        const db = await this.db.open();
+        const embeddings = this.db.getAllMessageEmbeddings();
+        
+        // Generate missing embeddings if needed
+        const docsNeedingEmbeddings = docs.filter(doc => !embeddings.has(parseInt(doc.id)));
+        if (docsNeedingEmbeddings.length > 0) {
+          const newEmbeddings = await generateDocumentEmbeddings(docsNeedingEmbeddings);
+          // Store embeddings (would need proper message ID mapping)
+          // For now, use in-memory embeddings
+          newEmbeddings.forEach((emb, idx) => {
+            // embeddings.set(...) - would need message ID
+          });
+        }
+
+        // Create embedding map for search (simplified)
+        const docEmbeddings = new Map<string, number[]>();
+        // Would need proper message ID mapping here
+        
+        // Use standard search for now if embeddings not fully available
+        // In production, would use hybridSearch here
+        return filtered.filter(msg => 
+          msg.text.toLowerCase().includes(query.toLowerCase())
+        );
+      } catch (error) {
+        console.error('Hybrid search error, falling back to keyword search:', error);
+        // Fallback to keyword search
+      }
+    }
+    
+    // Default keyword search
+    return filtered.filter(msg => 
+      msg.text.toLowerCase().includes(query.toLowerCase())
+    );
   }
 
   async clearDatabase(): Promise<void> {

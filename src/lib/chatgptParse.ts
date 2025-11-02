@@ -142,3 +142,9 @@ export function extractChatGPTConversation(conv: any): ParsedMsg[] {
 
 function crypto(){ return Math.random().toString(36).slice(2,10); }
 
+
+
+
+
+
+

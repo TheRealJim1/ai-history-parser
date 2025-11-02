@@ -40,3 +40,9 @@ export function extractTopics(text: string, max = 8): string[] {
     .map(([k]) => k);
 }
 
+
+
+
+
+
+

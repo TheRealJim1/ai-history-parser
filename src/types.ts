@@ -10,6 +10,7 @@ export interface Source {
   root: string;               // vault-relative path
   addedAt: number;
   color?: string;
+  label?: string;             // Human-friendly label, e.g., "ChatGPT 2025-02-08"
 }
 
 export interface FlatMessage {
@@ -24,8 +25,70 @@ export interface FlatMessage {
   text: string;
 }
 
+export interface TestModeSettings {
+  enabled: boolean;             // Default: false
+  stagingFolder: string;        // Default: "AI-Staging" (vault-relative)
+  ingestLimits: {
+    maxSources: number;        // Default: 1
+    maxFiles: number;          // Default: 20
+    maxConversations: number;  // Default: 25
+    sinceDays?: number;        // Optional: 90 (fast slice)
+  };
+  annotationLimit: number;     // Default: 20 conversations
+  autoRebuildOmnisearch: boolean; // Default: false (while testing)
+}
+
+export interface PythonPipelineSettings {
+  // Database
+  dbPath: string;              // Default: C:\Dev\ai-history-parser\ai_history.db (supports <vault> token)
+  
+  // Python & Scripts
+  pythonExecutable: string;     // Default: "python"
+  scriptsRoot: string;          // Default: C:\Dev\ai-history-parser
+  
+  // Media & Output
+  mediaSourceFolder: string;    // Default: C:\Dev\ai-history-parser\media
+  outputFolder: string;         // Default: "AI-History" (vault-relative)
+  stagingFolder?: string;       // Optional: "AI-Staging" (excluded from Omnisearch)
+  
+  // AI Annotation
+  aiAnnotation: {
+    enabled: boolean;           // Default: false
+    backend: 'ollama' | 'openai';
+    url: string;                // Default: http://127.0.0.1:11434 (Ollama)
+    model: string;              // Default: llama3.2:3b-instruct
+    batchSize: number;          // Default: 100
+    maxChars: number;           // Default: 8000
+    autoAnnotate: boolean;      // Default: false
+  };
+  
+  // Export Settings
+  exportSettings: {
+    chunkSize: number;         // Default: 20000
+    overlap: number;           // Default: 500
+    linkCloud: boolean;        // Default: true
+    addHashtags: boolean;      // Default: true
+  };
+  
+  // Test Mode
+  testMode?: TestModeSettings;
+}
+
+export interface ConversationAnnotation {
+  conversation_id: string;
+  summary: string | null;
+  tags: string[];
+  topics: string[];
+  entities: Record<string, string[]>;
+  dates: string[];
+  sentiment: string | null;
+  risk_flags: string[];
+  actions: string[];
+  updated_at: string | null;
+}
+
 export interface ParserSettings {
-  sources: Source[];             // multi-folder
+  sources: Source[];             // Repurposed: just stores folder paths for Sync
   lastActiveSourceIds: string[]; // order matters
   mergeMode: MergeMode;
   paneSizes: [number, number];   // left/right percent
@@ -35,6 +98,8 @@ export interface ParserSettings {
   // Legacy support
   exportFolder: string;
   recentFolders: string[];
+  // NEW: Python Pipeline
+  pythonPipeline?: PythonPipelineSettings;
 }
 
 export interface MessageLite {

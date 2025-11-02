@@ -76,3 +76,9 @@ export async function resetGraph(app: App, baseDir: string) {
   if (f) await app.vault.delete(f, true);
 }
 
+
+
+
+
+
+
