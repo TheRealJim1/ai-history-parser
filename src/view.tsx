@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { parseMultipleSources, searchMessages, highlightText } from "./parser";
+import { SearchWithHistory } from "./components/SearchWithHistory";
 import { executePythonScript, buildSyncCommand, buildAnnotateCommand, buildExportCommand } from "./utils/scriptRunner";
 import { resolveVaultPath } from "./settings";
 import { safeJson, mapAnnotationRow, type ConversationAnnotation, hasAnyAnnotations } from "./utils/jsonUtils";
@@ -27,8 +28,8 @@ import { aggregateConvTags } from "./lib/tags";
 import { groupTurns } from "./lib/grouping";
 import { LoadingSpinner, LoadingOverlay, LoadingButton } from "./ui/LoadingSpinner";
 import { ConversationCard } from "./ui/ConversationCard";
-import { MultiSelectToolbar } from "./ui/MultiSelectToolbar";
 import { ConversationsList } from "./ui/ConversationsList";
+import { DatabaseManager } from "./components/DatabaseManager";
 import type { FlatMessage, Source, Vendor, SearchFacets, SearchProgress, ParseError } from "./types";
 import type AIHistoryParser from "./main";
 
@@ -212,6 +213,8 @@ function HealthCheckPanel({ checks }: { checks: HealthCheck[] }) {
 
 // Main UI Component with SQLite + TanStack Query
 function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: ParserView }) {
+  // Vendor breakdown mode toggle
+  const [vendorMode, setVendorMode] = useState<'folder'|'company'>('folder');
   const rootRef = useRef<HTMLDivElement>(null);
   const [pinHeader, setPinHeader] = useState<boolean>(() => {
     const v = localStorage.getItem("aip.pinHeader");
@@ -237,11 +240,18 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     regex: false
   });
   const [selectedMessage, setSelectedMessage] = useState<FlatMessage | null>(null);
-
-  // Multi-select state
-  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
-  const [selectedConversations, setSelectedConversations] = useState<Set<string>>(new Set());
-  const [conversationLoading, setConversationLoading] = useState<Set<string>>(new Set());
+  
+  // Tree navigation state
+  const [treeNodes, setTreeNodes] = useState<any[]>([]);
+  const [hasTree, setHasTree] = useState(false);
+  const [selectedBranchPath, setSelectedBranchPath] = useState<string[]>([]); // Track which branch we're viewing
+  
+  // Database Manager modal state
+  const [showDatabaseManager, setShowDatabaseManager] = useState(false);
+  
+  // Tag filtering state
+  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(null);
+  const [activeViewTab, setActiveViewTab] = useState<'conversation' | 'tagged'>('conversation');
 
   // Local state for messages and database
   const [messages, setMessages] = useState<FlatMessage[]>([]);
@@ -281,75 +291,38 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     });
   }, [debouncedQuery, facets, activeSources]);
 
-  // Filter messages based on search and facets with ranking
+  // Filter messages based on search and facets
+  // Note: When search query is provided, FTS5 search is done at the database level
+  // So messages from DB are already filtered by search. We only apply facet filters here.
   const filteredMessages = useMemo(() => {
     if (!messages.length) return [];
     
     let filtered: FlatMessage[];
     
-    if (debouncedQuery.trim()) {
-      // Use ranked search for better results
-      filtered = rankedMessageSearch(messages, debouncedQuery, facets.regex || false, {
-        vendor: facets.vendor,
-        role: facets.role,
-        from: facets.from ? new Date(facets.from).getTime() : undefined,
-        to: facets.to ? new Date(facets.to).getTime() + 86400000 : undefined,
-        sourceIds: Array.from(activeSources)
-      });
-    } else {
-      // No query, just apply filters
-      filtered = messages.filter(msg => {
-        if (facets.vendor && facets.vendor !== 'all' && msg.vendor !== facets.vendor) return false;
-        if (facets.role && facets.role !== 'any' && msg.role !== facets.role) return false;
-        if (facets.from && msg.createdAt < new Date(facets.from).getTime()) return false;
-        if (facets.to && msg.createdAt > new Date(facets.to).getTime() + 86400000) return false;
-        // Only filter by activeSources if there are active sources selected
-        // If no sources are active, show all messages (don't filter)
-        if (activeSources.size > 0 && !activeSources.has(msg.sourceId)) return false;
-        return true;
-      });
-    }
+    // Apply facet filters (vendor, role, date, sources)
+    filtered = messages.filter(msg => {
+      if (facets.vendor && facets.vendor !== 'all' && msg.vendor !== facets.vendor) return false;
+      if (facets.role && facets.role !== 'any' && msg.role !== facets.role) return false;
+      if (facets.from && msg.createdAt && msg.createdAt < new Date(facets.from).getTime()) return false;
+      if (facets.to && msg.createdAt && msg.createdAt > new Date(facets.to).getTime() + 86400000) return false;
+      // Only filter by activeSources if there are active sources selected
+      if (activeSources.size > 0 && !activeSources.has(msg.sourceId)) return false;
+      return true;
+    });
     
-    // Safety check: If filtering by activeSources results in 0 messages, show all instead
-    // This prevents "wiping out" conversations when sources don't match
-    if (filtered.length === 0 && activeSources.size > 0 && messages.length > 0) {
-      console.warn(`⚠️ Filtering by activeSources (${Array.from(activeSources).join(', ')}) resulted in 0 messages. Showing all messages instead.`);
-      // Return all messages (only apply other filters like vendor, role, date)
-      if (debouncedQuery.trim()) {
-        // Re-run search without sourceIds filter
-        filtered = rankedMessageSearch(messages, debouncedQuery, facets.regex || false, {
-          vendor: facets.vendor,
-          role: facets.role,
-          from: facets.from ? new Date(facets.from).getTime() : undefined,
-          to: facets.to ? new Date(facets.to).getTime() + 86400000 : undefined,
-          // Don't filter by sourceIds
-        });
-      } else {
-        // Just apply non-source filters
-        filtered = messages.filter(msg => {
-          if (facets.vendor && facets.vendor !== 'all' && msg.vendor !== facets.vendor) return false;
-          if (facets.role && facets.role !== 'any' && msg.role !== facets.role) return false;
-          if (facets.from && msg.createdAt < new Date(facets.from).getTime()) return false;
-          if (facets.to && msg.createdAt > new Date(facets.to).getTime() + 86400000) return false;
-          // Don't filter by activeSources in fallback mode
-          return true;
-        });
-      }
+    // If search query was provided, messages are already ranked by FTS5 from DB
+    // Sort by FTS5 rank if available, otherwise by date
+    if (debouncedQuery.trim()) {
+      filtered.sort((a, b) => {
+        const aRank = (a as any).fts_rank || 0;
+        const bRank = (b as any).fts_rank || 0;
+        if (aRank !== bRank) return bRank - aRank; // Higher rank first (FTS5 returns lower rank = better)
+        return (a.createdAt || 0) - (b.createdAt || 0);
+      });
     }
     
     return filtered;
   }, [messages, debouncedQuery, facets, activeSources]);
-
-  // Handle search state separately
-  useEffect(() => {
-    if (debouncedQuery.trim()) {
-      setIsSearching(true);
-      const timer = setTimeout(() => setIsSearching(false), 100);
-      return () => clearTimeout(timer);
-    } else {
-      setIsSearching(false);
-    }
-  }, [debouncedQuery]);
 
   // Build conversation index using the new robust parser
   const groupedByConversation = useMemo(() => {
@@ -389,16 +362,24 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     // Convert to the format expected by the UI and add tags per conversation
     const byConvId = new Map<string, { text: string }[]>();
     const firstMsgByConv = new Map<string, FlatMessage>();
+    const folderPathByConv = new Map<string, string>();
     for (const m of deduplicatedMessages) {
       const arr = byConvId.get(m.conversationId) || [];
       arr.push({ text: m.text });
       byConvId.set(m.conversationId, arr);
       if (!firstMsgByConv.has(m.conversationId)) firstMsgByConv.set(m.conversationId, m);
+      // Track folder_path per conversation (from messages)
+      if (m.folder_path && !folderPathByConv.has(m.conversationId)) {
+        folderPathByConv.set(m.conversationId, m.folder_path);
+      }
     }
 
     const sourceIdToLabel = new Map<string, string>();
     for (const s of plugin.settings.sources) sourceIdToLabel.set(s.id, s.label || s.id);
 
+    // Get annotation map for outlier/attachment counts
+    const annotationMap = (setMessages as any).__annotations || new Map();
+    
     const result = index.map(conv => {
       // Temporarily disable auto-tagging (dom:/ent:/lang:) to reduce noise.
       // Keep only batch label so exports remain distinguishable.
@@ -406,6 +387,38 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
       const fm = firstMsgByConv.get(conv.convId);
       const batch = fm ? sourceIdToLabel.get(fm.sourceId) : undefined;
       if (batch) tags.push(`batch:${batch}`);
+      
+      // Extract first user/assistant line for title fallback
+      const firstUserLine = (() => {
+        if (fm && fm.text) {
+          const text = fm.text.split('\n')[0].trim();
+          return text.length > 80 ? text.substring(0, 80).trim() : text;
+        }
+        return null;
+      })();
+      
+      // Get meta from first message of conversation if available
+      const convMeta = (() => {
+        const fm = firstMsgByConv.get(conv.convId);
+        if (fm && (fm as any).meta) {
+          try {
+            return typeof (fm as any).meta === 'string' 
+              ? JSON.parse((fm as any).meta || '{}') 
+              : ((fm as any).meta || {});
+          } catch {
+            return {};
+          }
+        }
+        return {};
+      })();
+      
+      // Get outlier and attachment counts from annotation map
+      const annotation = annotationMap.get(conv.convId);
+      const outlierCount = (annotation as any)?.outlier_count || 0;
+      const attachmentCount = (annotation as any)?.attachment_count || 0;
+      // Auto-tags (fast wins) — keep outlier, remove attach for now (too noisy)
+      if (outlierCount > 0) tags.push(`outlier:${outlierCount}`);
+      
       return {
         key: conv.convId, // For pagination hook
         convId: conv.convId, // already in format "vendor:convId"
@@ -414,7 +427,12 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
         msgCount: conv.msgCount,
         firstTs: conv.firstTs,
         lastTs: conv.lastTs,
-        tags
+        tags,
+        firstUserLine,
+        folder_path: folderPathByConv.get(conv.convId) || "",  // Include folder_path from messages
+        meta: convMeta,  // Include meta for pairing information
+        outlierCount,  // Include outlier count from database
+        attachmentCount  // Include attachment count from database
       };
     });
     
@@ -423,11 +441,11 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
       sample: result.slice(0, 3).map(g => ({ 
         title: g.title || "(untitled)", 
         msgCount: g.msgCount, 
-        vendor: g.vendor,
+      vendor: g.vendor,
         convId: g.convId,
         key: g.key,
-        firstTs: new Date(g.firstTs).toLocaleString(),
-        lastTs: new Date(g.lastTs).toLocaleString()
+      firstTs: new Date(g.firstTs).toLocaleString(),
+      lastTs: new Date(g.lastTs).toLocaleString()
       }))
     });
     
@@ -438,15 +456,14 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
         title: m.title,
         textLength: m.text?.length || 0,
         uid: m.uid
-      })));
+    })));
     }
     
     return result;
   }, [filteredMessages]);
 
-  // Selected conversations (multi-select)
-  const [selectedConvKeys, setSelectedConvKeys] = useState<Set<string>>(new Set());
-  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  // Selected conversation (single-select only)
+  const [selectedConvKey, setSelectedConvKey] = useState<string | null>(null);
   const [useNewView, setUseNewView] = useState(false);
   
   // Pagination for conversation list
@@ -484,15 +501,15 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
 
   // Auto-select first conversation if none selected
   useEffect(() => {
-    if (selectedConvKeys.size === 0 && pagedConversations.length > 0) {
+    if (!selectedConvKey && pagedConversations.length > 0) {
       const firstConv = pagedConversations[0];
-      const firstConvId = firstConv?.convId; // Use convId, not key
+      const firstConvId = firstConv?.convId;
       if (firstConvId) {
         console.log("🔄 Auto-selecting first conversation:", firstConvId, firstConv?.title);
-        setSelectedConvKeys(new Set([firstConvId]));
+        setSelectedConvKey(firstConvId);
       }
     }
-  }, [pagedConversations, selectedConvKeys]);
+  }, [pagedConversations, selectedConvKey]);
   
   // Debug logging for troubleshooting
   useEffect(() => {
@@ -518,54 +535,85 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     });
   }, [messages.length, filteredMessages.length, groupedByConversation.length, pagedConversations.length, activeSources.size]);
 
-  // Handle conversation selection
-  const handleConvClick = (convKey: string, ctrlKey: boolean) => {
+  // Handle conversation selection (single-select only)
+  const handleConvClick = (convKey: string) => {
     console.log("🔄 Conversation clicked:", convKey);
-    console.log("🔄 Multi-select mode:", multiSelectMode);
-    console.log("🔄 Ctrl key:", ctrlKey);
-    console.log("🔄 Current selected keys:", Array.from(selectedConvKeys));
-    
-    if (multiSelectMode || ctrlKey) {
-      setSelectedConvKeys(prev => {
-        const newSet = new Set(prev);
-        if (newSet.has(convKey)) {
-          newSet.delete(convKey);
-        } else {
-          newSet.add(convKey);
-        }
-        console.log("🔄 New selected keys:", Array.from(newSet));
-        return newSet;
-      });
-    } else {
-      setSelectedConvKeys(new Set([convKey]));
-      console.log("🔄 Single select, new selected keys:", [convKey]);
-    }
+    setSelectedConvKey(convKey);
+    setSelectedBranchPath([]); // Reset branch path when selecting new conversation
   };
 
-  // Messages for the selected conversations (supports single and multi-select)
+  // Filter conversations by tag
+  const taggedConversations = useMemo(() => {
+    if (!activeTagFilter) return [];
+    return groupedByConversation.filter(conv => 
+      conv.tags && conv.tags.some(tag => tag === activeTagFilter || tag.includes(activeTagFilter))
+    );
+  }, [groupedByConversation, activeTagFilter]);
+
+  // Messages for tagged conversations
+  const taggedMessages = useMemo(() => {
+    if (!activeTagFilter || taggedConversations.length === 0) return [];
+    const taggedConvIds = new Set(taggedConversations.map(c => c.convId));
+    return filteredMessages.filter(msg => taggedConvIds.has(msg.conversationId));
+  }, [filteredMessages, taggedConversations, activeTagFilter]);
+
+  // Messages for the selected conversation (with tree branch filtering if applicable)
   const selectedConvMessages = useMemo(() => {
-    // Use the active selection set depending on mode
-    const activeSelection = isMultiSelectMode ? selectedConversations : selectedConvKeys;
-
-    console.log("🔄 Filtering messages for selected conversations");
-    console.log("🔄 Multi-select mode:", isMultiSelectMode);
-    console.log("🔄 Active selected keys:", Array.from(activeSelection));
+    console.log("🔄 Filtering messages for selected conversation:", selectedConvKey);
     console.log("🔄 Total filtered messages:", filteredMessages.length);
+    console.log("🔄 Has tree:", hasTree);
+    console.log("🔄 Selected branch path:", selectedBranchPath);
 
-    if (activeSelection.size === 0) {
-      console.log("🔄 No conversations selected, returning empty messages");
+    if (!selectedConvKey) {
+      console.log("🔄 No conversation selected, returning empty messages");
       return [] as FlatMessage[];
     }
 
-    const selected = filteredMessages
-      .filter(m => activeSelection.has(m.conversationId))
+    let selected = filteredMessages
+      .filter(m => m.conversationId === selectedConvKey)
       .sort((a,b) => a.createdAt - b.createdAt);
 
-    console.log("🔄 Selected messages:", selected.length);
-    console.log("🔄 Sample selected message:", selected[0]);
+    // If tree structure is available and we have a branch path, filter by branch
+    if (hasTree && selectedBranchPath.length > 0 && treeNodes.length > 0) {
+      // Build a set of message IDs that are in the selected branch path
+      const branchMessageIds = new Set<string>();
+      const nodeMap = new Map<string, any>();
+      
+      // Build node map for this conversation
+      treeNodes
+        .filter((n: any) => n.conversation_id === selectedConvKey)
+        .forEach((n: any) => {
+          nodeMap.set(n.id, n);
+        });
+      
+      // Traverse the branch path to collect message IDs
+      let currentNodeId = selectedBranchPath[0];
+      for (const branchNodeId of selectedBranchPath) {
+        const node = nodeMap.get(branchNodeId);
+        if (node && node.message_id) {
+          branchMessageIds.add(node.message_id);
+        }
+        // Follow children chain
+        if (node && node.children_ids) {
+          const children = typeof node.children_ids === 'string' 
+            ? JSON.parse(node.children_ids) 
+            : node.children_ids;
+          if (Array.isArray(children) && children.length > 0) {
+            currentNodeId = children[0]; // Follow first child
+          }
+        }
+      }
+      
+      // Filter messages to only those in the branch
+      if (branchMessageIds.size > 0) {
+        selected = selected.filter(m => branchMessageIds.has(m.messageId));
+        console.log(`🔄 Filtered to branch: ${selected.length} messages in branch path`);
+      }
+    }
 
+    console.log("🔄 Selected messages:", selected.length);
     return selected;
-  }, [filteredMessages, isMultiSelectMode, selectedConvKeys, selectedConversations]);
+  }, [filteredMessages, selectedConvKey, hasTree, selectedBranchPath, treeNodes]);
 
   // Group messages into turns for better display
   const selectedConvTurns = useMemo(() => {
@@ -597,43 +645,66 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     return turns;
   }, [selectedConvMessages]);
 
-  // Multi-select helper functions
-  const handleToggleMultiSelect = useCallback(() => {
-    setIsMultiSelectMode(prev => !prev);
-    if (isMultiSelectMode) {
-      setSelectedConversations(new Set());
-    }
-  }, [isMultiSelectMode]);
+  // Tree navigation helpers
+  const getTreeNodesForConversation = useCallback((convId: string) => {
+    if (!hasTree || !treeNodes.length) return [];
+    return treeNodes.filter((n: any) => n.conversation_id === convId);
+  }, [hasTree, treeNodes]);
 
-  const handleSelectConversation = useCallback((convId: string) => {
-    if (isMultiSelectMode) {
-      setSelectedConversations(prev => {
-        const newSet = new Set(prev);
-        if (newSet.has(convId)) {
-          newSet.delete(convId);
-        } else {
-          newSet.add(convId);
+  const getBranchPointsForConversation = useCallback((convId: string) => {
+    const nodes = getTreeNodesForConversation(convId);
+    return nodes.filter((n: any) => n.is_branch_point === 1);
+  }, [getTreeNodesForConversation]);
+
+  const navigateToBranch = useCallback((branchNodeId: string) => {
+    if (!hasTree || !selectedConvKey) return;
+    
+    const nodeMap = new Map<string, any>();
+    treeNodes
+      .filter((n: any) => {
+        const nodeConvId = n.conversation_id || n.conversationId;
+        return nodeConvId === selectedConvKey || nodeConvId === selectedConvKey.split(':').slice(1).join(':');
+      })
+      .forEach((n: any) => {
+        nodeMap.set(n.id, n);
+        // Also index by messageId if available
+        if (n.messageId) {
+          nodeMap.set(n.messageId, n);
         }
-        return newSet;
       });
-    } else {
-      setSelectedConvKeys(new Set([convId]));
+    
+    // Try to find the node by ID or messageId
+    let targetNode = nodeMap.get(branchNodeId);
+    if (!targetNode) {
+      // Try to find by messageId
+      for (const [id, node] of nodeMap.entries()) {
+        if (node.messageId === branchNodeId || node.id === branchNodeId) {
+          targetNode = node;
+          break;
+        }
+      }
     }
-  }, [isMultiSelectMode]);
-
-  const handleSelectAll = useCallback(() => {
-    const allConvIds = new Set(groupedByConversation.map(conv => conv.convId));
-    setSelectedConversations(allConvIds);
-  }, [groupedByConversation]);
-
-  const handleSelectNone = useCallback(() => {
-    setSelectedConversations(new Set());
-  }, []);
-
-  const handleExportSelected = useCallback(() => {
-    console.log("Exporting selected conversations:", Array.from(selectedConversations));
-    // TODO: Implement export functionality
-  }, [selectedConversations]);
+    
+    if (!targetNode) {
+      console.warn("⚠️ Could not find branch node:", branchNodeId);
+      return;
+    }
+    
+    // Build path from root to this branch node
+    const path: string[] = [];
+    let currentNodeId: string | null = targetNode.id;
+    
+    while (currentNodeId) {
+      const node = nodeMap.get(currentNodeId);
+      if (!node) break;
+      
+      path.unshift(currentNodeId);
+      currentNodeId = node.parentId || node.parent_id || null;
+    }
+    
+    setSelectedBranchPath(path);
+    console.log("🔄 Navigated to branch:", path, "for node:", branchNodeId);
+  }, [hasTree, selectedConvKey, treeNodes]);
 
   // Pagination for the selected conversation turns (middle pane)
   const {
@@ -648,14 +719,15 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
   } = usePagination(selectedConvTurns, {
     defaultPageSize: 50, // Fewer turns per page since each turn can contain multiple messages
     persistKey: "aip.pageSize",
-    currentFilterHash: `${filterHash}|conv=${Array.from(isMultiSelectMode ? selectedConversations : selectedConvKeys).sort().join(',')}`
+    currentFilterHash: `${filterHash}|conv=${selectedConvKey || 'none'}|branch=${selectedBranchPath.join(',')}`
   });
 
   // NOTE: Folder parsing is now disabled - use refreshFromDB instead
   // All folder parsing code has been removed - plugin now reads from external DB only
   
   // Refresh from DB - reads from external database (defined first for loadMessages)
-  const refreshFromDB = useCallback(async () => {
+  // Supports FTS5 search when searchQuery is provided
+  const refreshFromDB = useCallback(async (searchQueryOverride?: string) => {
     const { pythonPipeline } = plugin.settings;
     
     if (!pythonPipeline?.dbPath) {
@@ -666,188 +738,57 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     setMessagesLoading(true);
     setStatus("loading");
     
+    // Use searchQueryOverride if provided, otherwise use current debouncedQuery
+    const queryToUse = searchQueryOverride !== undefined ? searchQueryOverride : debouncedQuery;
+    
     // Initialize progress tracking
-    const progressHandle = statusBus.begin("refresh-db", "Loading from database...");
+    const progressHandle = statusBus.begin("refresh-db", queryToUse.trim() ? "Searching database..." : "Loading from database...");
     
     try {
       // Use Python bridge script to query DB and return JSON
       const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
       const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
       
-      // Check if DB exists first
+              // Check if DB exists first
       const { spawn } = require("child_process");
       const fs = require("fs");
       if (!fs.existsSync(dbPath)) {
         progressHandle.fail("Database not found");
-        throw new Error(`Database not found: ${dbPath}. Run "Sync from Backups" first.`);
+        throw new Error(`Database not found: ${dbPath}. Please configure the database path in settings.`);
       }
       
-      // Create a temporary Python script file to avoid Windows shell issues with multiline strings
-      const os = require("os");
+      // Use external query script that auto-detects schema (old vs new)
       const path = require("path");
-      const scriptPath = path.join(os.tmpdir(), `aihp_query_${Date.now()}.py`);
+      const queryScriptPath = path.join(
+        pythonPipeline.scriptsRoot || vaultBasePath,
+        'tools',
+        'obsidian_query_script_v2.py'
+      );
       
-      const queryScript = `import sqlite3, json, sys
-from datetime import datetime
-db_path = r"${dbPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
-con = sqlite3.connect(db_path)
-cur = con.cursor()
-
-# Helper function to convert datetime string to Unix timestamp
-def to_timestamp(dt_str):
-    if not dt_str:
-        return 0
-    try:
-        # Try parsing as datetime string (format: "YYYY-MM-DD HH:MM:SS")
-        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-        return int(dt.timestamp())
-    except (ValueError, TypeError):
-        # If parsing fails, try as integer (already a timestamp)
-        try:
-            return int(float(dt_str))
-        except (ValueError, TypeError):
-            return 0
-
-# Check if conversation_annotation table exists
-has_annotations = False
-try:
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_annotation'")
-    has_annotations = cur.fetchone() is not None
-except:
-    pass
-
-# Query conversations (with or without annotations)
-if has_annotations:
-    convs = cur.execute("""
-SELECT
-  c.id, c.title, c.provider,
-  COALESCE(c.updated_at, c.created_at) AS ts,
-  COALESCE(a.summary, '')              AS summary,
-  COALESCE(a.tags,    '[]')            AS tags_json,
-  COALESCE(a.topics,  '[]')            AS topics_json,
-  COALESCE(a.entities,'{}')            AS entities_json,
-  COALESCE(a.risk_flags,'[]')          AS risk_json,
-  COALESCE(a.sentiment,'neutral')      AS sentiment
-FROM conversation c
-LEFT JOIN conversation_annotation a
-  ON a.conversation_id = c.id
-ORDER BY ts DESC
-""").fetchall()
-else:
-    # Fallback: no annotations table yet
-    convs = cur.execute("""
-SELECT
-  c.id, c.title, c.provider,
-  COALESCE(c.updated_at, c.created_at) AS ts,
-  '' AS summary,
-  '[]' AS tags_json,
-  '[]' AS topics_json,
-  '{}' AS entities_json,
-  '[]' AS risk_json,
-  'neutral' AS sentiment
-FROM conversation c
-ORDER BY ts DESC
-""").fetchall()
-
-# Query all messages at once (much faster than one query per conversation)
-# Output progress to stderr (will be parsed by TypeScript)
-total_convs = len(convs)
-conv_ids = [c[0] for c in convs]
-sys.stderr.write("PROGRESS:TOTAL:" + str(total_convs) + "\\n")
-sys.stderr.flush()
-
-# Create a map of conversation_id -> (title, provider) for quick lookup
-# SELECT order: id[0], title[1], provider[2]
-conv_map = {c[0]: (c[1] or "", c[2] or "unknown") for c in convs}  # title, provider
-
-# Single query to get all messages for all conversations
-# Use IN clause with placeholders (SQLite supports up to ~500, but we'll batch if needed)
-messages = []
-if len(conv_ids) <= 500:
-    # Single query if under SQLite's practical limit
-    placeholders = ','.join('?' * len(conv_ids))
-    all_msgs = cur.execute(f"SELECT id, conversation_id, idx, role, author, model, created_at, content FROM message WHERE conversation_id IN ({placeholders}) ORDER BY conversation_id, idx", conv_ids).fetchall()
-    
-    processed = 0
-    for msg in all_msgs:
-        conv_id = msg[1]
-        title, provider = conv_map.get(conv_id, ("", "unknown"))  # Fixed: title first, then provider
-        messages.append({
-            "uid": f"{conv_id}:{msg[0]}",
-            "conversationId": str(conv_id),
-            "messageId": str(msg[0]),
-            "role": msg[3] or "unknown",
-            "createdAt": to_timestamp(msg[6]),
-            "text": msg[7] or "",
-            "title": title or "",  # Now correctly using title
-            "vendor": provider or "chatgpt",  # Now correctly using provider
-            "sourceId": provider or "unknown"
-        })
-        
-        processed += 1
-        # Update progress every 1000 messages
-        if processed % 1000 == 0:
-            pct = int((processed / len(all_msgs)) * total_convs)
-            sys.stderr.write("PROGRESS:TICK:" + str(pct) + ":" + str(total_convs) + "\\n")
-            sys.stderr.flush()
-    
-    # Final progress update
-    sys.stderr.write("PROGRESS:TICK:" + str(total_convs) + ":" + str(total_convs) + "\\n")
-    sys.stderr.flush()
-else:
-    # Batch if too many conversations (rare case)
-    batch_size = 500
-    processed_convs = 0
-    for i in range(0, len(conv_ids), batch_size):
-        batch = conv_ids[i:i+batch_size]
-        placeholders = ','.join('?' * len(batch))
-        batch_msgs = cur.execute(f"SELECT id, conversation_id, idx, role, author, model, created_at, content FROM message WHERE conversation_id IN ({placeholders}) ORDER BY conversation_id, idx", batch).fetchall()
-        
-        for msg in batch_msgs:
-            conv_id = msg[1]
-            provider, title = conv_map.get(conv_id, ("unknown", ""))
-            messages.append({
-                "uid": f"{conv_id}:{msg[0]}",
-                "conversationId": str(conv_id),
-                "messageId": str(msg[0]),
-                "role": msg[3] or "unknown",
-                "createdAt": to_timestamp(msg[6]),
-                "text": msg[7] or "",
-                "title": title or "",
-                "vendor": provider or "chatgpt",
-                "sourceId": provider or "unknown"
-            })
-        
-        processed_convs += len(batch)
-        sys.stderr.write("PROGRESS:TICK:" + str(processed_convs) + ":" + str(total_convs) + "\\n")
-        sys.stderr.flush()
-
-# Build conversations list with annotation data
-conv_list = []
-for c in convs:
-    conv_list.append({
-        "id": c[0],
-        "title": c[1] or "",  # Fixed: title is at index 1
-        "provider": c[2] or "unknown",  # Fixed: provider is at index 2
-        "ts": c[3],
-        "summary": c[4],
-        "tags_json": c[5],
-        "topics_json": c[6],
-        "entities_json": c[7],
-        "risk_json": c[8],
-        "sentiment": c[9]
-    })
-
-print(json.dumps({"conversations": conv_list, "messages": messages}))
-con.close()
-`;
+      // Check if query script exists, fallback to inline script if not
+      if (!fs.existsSync(queryScriptPath)) {
+        progressHandle.fail("Query script not found");
+        throw new Error(`Query script not found: ${queryScriptPath}. Please ensure tools/obsidian_query_script_v2.py exists.`);
+      }
       
-      // Write script to temp file
-      fs.writeFileSync(scriptPath, queryScript, 'utf8');
-      
-      // Execute query script from file (more reliable on Windows)
+      // Execute query script with database path and optional search query
       // Use shell:false since we're passing args as an array
-      const proc = spawn(pythonPipeline.pythonExecutable, [scriptPath], { shell: false });
+      const args = [queryScriptPath, dbPath];
+      // Add search query if provided (for FTS5 search)
+      // Prefix with / to indicate regex mode (won't use FTS5)
+      if (queryToUse && queryToUse.trim()) {
+        if (facets.regex) {
+          args.push(`/${queryToUse.trim()}`);
+        } else {
+          args.push(queryToUse.trim());
+        }
+      }
+      
+      const proc = spawn(
+        pythonPipeline.pythonExecutable || 'python',
+        args,
+        { shell: false, cwd: pythonPipeline.scriptsRoot || vaultBasePath }
+      );
       
       let stdout = '';
       let stderr = '';
@@ -884,18 +825,29 @@ con.close()
       
       await new Promise<void>((resolve, reject) => {
         proc.on('close', (code: number) => {
-          // Clean up temp file
-          try {
-            if (fs.existsSync(scriptPath)) {
-              fs.unlinkSync(scriptPath);
-            }
-          } catch (e) {
-            // Ignore cleanup errors
-          }
-          
           if (code === 0) {
             try {
               const data = JSON.parse(stdout);
+              
+              // Store tree structure if available (for tree visualization)
+              const hasTree = data.hasTree || false;
+              const schema = data.schema || 'v1';
+              const treeNodes = data.nodes || [];
+              
+              // Store tree data globally for tree view components and in state
+              if (hasTree && treeNodes.length > 0) {
+                (window as any).__aihp_tree_nodes = treeNodes;
+                (window as any).__aihp_has_tree = true;
+                setTreeNodes(treeNodes);
+                setHasTree(true);
+                console.log(`✅ Tree structure loaded: ${treeNodes.length} nodes, schema: ${schema}`);
+              } else {
+                (window as any).__aihp_tree_nodes = [];
+                (window as any).__aihp_has_tree = false;
+                setTreeNodes([]);
+                setHasTree(false);
+                console.log(`ℹ️ No tree structure available (schema: ${schema})`);
+              }
               
               // Map provider to source.id for filtering
               // The Python DB stores provider (e.g., "openai") but plugin sources have unique IDs
@@ -968,9 +920,22 @@ con.close()
               });
               
               // Parse conversations with annotations (safe JSON parsing)
-              const conversations: ConversationAnnotation[] = (data.conversations || []).map((c: any) => 
-                mapAnnotationRow(c)
-              );
+              // Preserve meta field for pairing information and include outlier/attachment counts
+              const conversations: ConversationAnnotation[] = (data.conversations || []).map((c: any) => {
+                const row = mapAnnotationRow(c);
+                // Preserve meta field for pairing information
+                if (c.meta) {
+                  try {
+                    (row as any).meta = typeof c.meta === 'string' ? JSON.parse(c.meta) : c.meta;
+                  } catch {
+                    (row as any).meta = {};
+                  }
+                }
+                // Include outlier_count and attachment_count
+                if (c.outlier_count !== undefined) (row as any).outlier_count = c.outlier_count || 0;
+                if (c.attachment_count !== undefined) (row as any).attachment_count = c.attachment_count || 0;
+                return row;
+              });
               
               // Store annotations in a map for quick lookup
               const annotationMap = new Map<string, ConversationAnnotation>();
@@ -996,14 +961,6 @@ con.close()
         });
         proc.on('error', (error: any) => {
           progressHandle.fail(`Failed to execute: ${error.message}`);
-          // Clean up temp file on error
-          try {
-            if (fs.existsSync(scriptPath)) {
-              fs.unlinkSync(scriptPath);
-            }
-          } catch (e) {
-            // Ignore cleanup errors
-          }
           reject(new Error(`Failed to execute query script: ${error.message}`));
         });
       });
@@ -1019,6 +976,21 @@ con.close()
       setMessagesLoading(false);
     }
   }, [plugin]);
+
+  // Handle search state separately - refresh from DB when search query changes (after debounce)
+  // Note: This must be after refreshFromDB is defined
+  useEffect(() => {
+    if (debouncedQuery.trim()) {
+      setIsSearching(true);
+      // Refresh from DB with search query to use FTS5
+      refreshFromDB(debouncedQuery).finally(() => {
+        setIsSearching(false);
+      });
+    } else if (debouncedQuery === '') {
+      // Empty query - refresh without search
+      refreshFromDB('');
+    }
+  }, [debouncedQuery, facets.regex, refreshFromDB]);
 
   // Load messages from database (replaces folder parsing)
   const loadMessages = useCallback(async () => {
@@ -1811,7 +1783,7 @@ con.close()
       {/* Database Warning Banner */}
       {dbExists === false && (
         <div className="aip-banner aip-banner-warning" style={{padding: '10px', background: 'var(--background-modifier-error)', color: 'var(--text-on-accent)', textAlign: 'center'}}>
-          <strong>⚠️ Database not found</strong> — Run "Sync from Backups" to create it. Path: {plugin.settings.pythonPipeline?.dbPath || 'not configured'}
+          <strong>⚠️ Database not found</strong> — Click "Select Database…" to configure the database path. Current: {plugin.settings.pythonPipeline?.dbPath || 'not configured'}
         </div>
       )}
       
@@ -1830,7 +1802,7 @@ con.close()
       <SelfCheckPanel result={selfCheckResult} isLoading={isRunningSelfCheck} />
       
       {/* Sticky Header */}
-      <header className={`aip-header ${pinHeader ? "is-sticky" : ""}`}>
+      <header className={`aip-header ${pinHeader ? "is-sticky" : ""}`} style={{ padding: '6px 8px', marginBottom: '4px' }}>
         <div className="aip-header-row">
           {/* LEFT: App title + status */}
           <div className="aip-header-left">
@@ -1846,13 +1818,26 @@ con.close()
 
           {/* MIDDLE: Primary controls */}
           <div className="aip-header-center">
-            <button className="aihp-btn" onClick={addSource}>Manage Sources…</button>
             <button 
-              className="aihp-btn primary" 
-              onClick={syncFromBackups}
-              disabled={isImporting}
+              className="aihp-btn" 
+              onClick={() => {
+                // Open Database Manager modal
+                setShowDatabaseManager(true);
+              }}
+              title={`Current database: ${plugin.settings.pythonPipeline?.dbPath || 'not configured'}\nClick to manage databases and imports`}
             >
-              {isImporting ? 'Syncing...' : 'Sync from Backups'}
+              {plugin.settings.pythonPipeline?.dbPath 
+                ? `📁 ${plugin.settings.pythonPipeline.dbPath.split(/[\\/]/).pop() || 'Database'}`
+                : 'Database Manager…'}
+            </button>
+            
+            <button 
+              className="aihp-btn" 
+              onClick={refreshFromDB}
+              disabled={isImporting || messagesLoading}
+              title="Refresh UI from current database"
+            >
+              {messagesLoading ? 'Loading...' : 'Refresh from DB'}
             </button>
             
             {plugin.settings.pythonPipeline?.aiAnnotation?.enabled && (
@@ -1865,40 +1850,35 @@ con.close()
                 Annotate with AI
               </button>
             )}
-            
-            <button 
-              className="aihp-btn" 
-              onClick={exportToMarkdown}
-              disabled={isImporting}
-              title="Export to Markdown files (full content + images)"
-            >
-              Export to Markdown
-            </button>
-            
-            <button 
-              className="aihp-btn" 
-              onClick={exportToGraph}
-              disabled={isImporting}
-              title="Export graph edges only (lightweight links)"
-            >
-              Export to Graph
-            </button>
-            
-            <button 
-              className="aihp-btn" 
-              onClick={refreshFromDB}
-              disabled={isImporting}
-              title="Refresh UI from database"
-            >
-              Refresh from DB
-            </button>
 
-            <input
-              className="aihp-input search"
-              placeholder="Search messages… (regex ok)"
+            {/* Search Bar - In header center with history */}
+            <SearchWithHistory
               value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
+              onChange={setSearchQuery}
+              onSearch={(query) => {
+                setSearchQuery(query);
+                refreshFromDB(query);
+              }}
+              placeholder={selfCheckResult?.fullTextSearch?.enabled 
+                ? "🔍 Search messages (FTS5 indexed)… (prefix with / for regex)" 
+                : "🔍 Search messages… (prefix with / for regex)"}
+              maxHistory={50}
+              showSuggestions={true}
             />
+            {selfCheckResult?.fullTextSearch?.enabled && (
+              <span style={{ 
+                fontSize: '11px', 
+                opacity: 0.7, 
+                whiteSpace: 'nowrap',
+                marginLeft: '8px',
+                padding: '4px 8px',
+                background: 'var(--background-modifier-hover)',
+                borderRadius: '4px'
+              }}>
+                FTS5: {selfCheckResult.fullTextSearch.count.toLocaleString()} indexed
+              </span>
+            )}
+
           </div>
 
           {/* RIGHT: Header actions */}
@@ -1929,7 +1909,8 @@ con.close()
         </div>
 
         {/* Source Manager Row */}
-        <div className="aip-sources-row">
+        {/* Sources row minimized to gain vertical space */}
+        <div className="aip-sources-row" style={{ display: 'none' }}>
           <div className="aip-sources-header">
             <span>Active Sources:</span>
             <span className="aip-sources-count">{activeSources.size} selected</span>
@@ -2027,7 +2008,7 @@ con.close()
       {useNewView ? (
         <TestView messages={messages} />
       ) : (
-      <div className="aip-body">
+      <div className="aip-body" style={{ display: 'grid', gridTemplateRows: '1fr auto', gridTemplateColumns: 'var(--aip-col-left, 320px) 1fr', gap: '10px' }}>
         {/* Left Pane: Conversation List */}
         <section className="aip-pane aip-left" style={{
           display: 'flex',
@@ -2035,48 +2016,46 @@ con.close()
           overflow: 'hidden',
           position: 'relative'
         }}>
-          <MultiSelectToolbar
-            selectedCount={isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size}
-            totalCount={groupedByConversation.length}
-            isMultiSelectMode={isMultiSelectMode}
-            onToggleMultiSelect={handleToggleMultiSelect}
-            onSelectAll={handleSelectAll}
-            onSelectNone={handleSelectNone}
-            onExportSelected={handleExportSelected}
-            isLoading={messagesLoading}
-          />
+          <div className="aip-pane-header">
+            <div className="aip-pane-header-top">
+              <span>Conversations ({groupedByConversation.length.toLocaleString()})</span>
+              {hasTree && (
+                <span style={{ fontSize: '11px', opacity: 0.7, marginLeft: '8px' }}>
+                  • Tree structure available
+                </span>
+              )}
+            </div>
+          </div>
           
           <LoadingOverlay isLoading={messagesLoading} text="Loading conversations...">
-            {(() => {
-              const firstThree = pagedConversations.slice(0, 3);
-              console.log("🔄 Rendering ConversationsList with:", {
-                pagedConversationsLength: pagedConversations.length,
-                firstThreeRaw: firstThree,
-                firstThreeDetails: firstThree.map(c => ({
-                  convId: c?.convId,
-                  title: c?.title,
-                  hasTitle: !!c?.title,
-                  hasConvId: !!c?.convId,
-                  vendor: c?.vendor,
-                  msgCount: c?.msgCount,
-                  allKeys: Object.keys(c || {})
-                })),
-                total: convTotal,
-                page: convPage,
-                pageCount: convPageCount,
-                pageSize: convPageSize
-              });
-              return (
-                <ConversationsList
-                  conversations={pagedConversations}
-                  selectedConversations={isMultiSelectMode ? selectedConversations : selectedConvKeys}
-                  isMultiSelectMode={isMultiSelectMode}
-                  onSelectConversation={handleSelectConversation}
-                  onToggleConversation={handleSelectConversation}
-                  isLoading={messagesLoading}
-                />
-              );
-            })()}
+            <ConversationsList
+              conversations={pagedConversations}
+              selectedConversations={selectedConvKey ? new Set([selectedConvKey]) : new Set()}
+              isMultiSelectMode={false}
+              onSelectConversation={handleConvClick}
+              onToggleConversation={handleConvClick}
+              isLoading={messagesLoading}
+              treeNodes={hasTree ? treeNodes : []}
+              onNavigateToBranch={(convId: string, branchNodeId: string) => {
+                // First select the conversation if not already selected
+                if (convId !== selectedConvKey) {
+                  handleConvClick(convId);
+                }
+                
+                // Then navigate to the branch
+                if (branchNodeId && branchNodeId !== '') {
+                  navigateToBranch(branchNodeId);
+                } else {
+                  // Clear branch view
+                  setSelectedBranchPath([]);
+                }
+              }}
+              selectedBranchPath={selectedBranchPath}
+              onTagClick={(tag: string) => {
+                setActiveTagFilter(tag);
+                setActiveViewTab('tagged');
+              }}
+            />
           </LoadingOverlay>
           
           {/* Pagination for conversations list */}
@@ -2097,40 +2076,452 @@ con.close()
         {/* Center Pane: Selected Conversation Messages + Pagination */}
         <section className="aip-pane aip-center">
           <LoadingOverlay isLoading={isSearching} text="Searching messages...">
-            {selectedConvMessages.length === 0 && (
+            {/* Tab Navigation */}
+            {(activeTagFilter || selectedConvKey) && (
+              <div style={{
+                display: 'flex',
+                gap: '8px',
+                padding: '8px 12px',
+                borderBottom: '1px solid var(--background-modifier-border)',
+                backgroundColor: 'var(--background-secondary)'
+              }}>
+                <button
+                  onClick={() => {
+                    setActiveViewTab('conversation');
+                    if (!selectedConvKey) {
+                      setActiveTagFilter(null);
+                    }
+                  }}
+                  style={{
+                    padding: '6px 12px',
+                    fontSize: '13px',
+                    fontWeight: activeViewTab === 'conversation' ? '600' : '400',
+                    border: 'none',
+                    borderRadius: '4px',
+                    background: activeViewTab === 'conversation' 
+                      ? 'var(--background-modifier-hover)' 
+                      : 'transparent',
+                    color: activeViewTab === 'conversation' 
+                      ? 'var(--text-normal)' 
+                      : 'var(--text-muted)',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  Conversation
+                  {selectedConvKey && (
+                    <span style={{ marginLeft: '6px', opacity: 0.7 }}>
+                      ({selectedConvMessages.length})
+                    </span>
+                  )}
+                </button>
+                {activeTagFilter && (
+                  <button
+                    onClick={() => setActiveViewTab('tagged')}
+                    style={{
+                      padding: '6px 12px',
+                      fontSize: '13px',
+                      fontWeight: activeViewTab === 'tagged' ? '600' : '400',
+                      border: 'none',
+                      borderRadius: '4px',
+                      background: activeViewTab === 'tagged' 
+                        ? 'var(--background-modifier-hover)' 
+                        : 'transparent',
+                      color: activeViewTab === 'tagged' 
+                        ? 'var(--text-normal)' 
+                        : 'var(--text-muted)',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <span>Tagged: {activeTagFilter.replace(/^batch:/, '')}</span>
+                    <span style={{ opacity: 0.7 }}>
+                      ({taggedMessages.length} messages, {taggedConversations.length} conversations)
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveTagFilter(null);
+                        setActiveViewTab('conversation');
+                      }}
+                      style={{
+                        marginLeft: '4px',
+                        padding: '2px 6px',
+                        fontSize: '11px',
+                        border: 'none',
+                        borderRadius: '3px',
+                        background: 'var(--background-modifier-border)',
+                        color: 'var(--text-muted)',
+                        cursor: 'pointer',
+                        opacity: 0.7
+                      }}
+                      title="Clear tag filter"
+                    >
+                      ×
+                    </button>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Tagged Messages View */}
+            {activeViewTab === 'tagged' && activeTagFilter && (
+              <div className="aihp-message-detail" style={{ padding: '16px', overflowY: 'auto', height: '100%' }}>
+                <div style={{ marginBottom: '16px' }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '8px' }}>
+                    Conversations with tag: <span style={{ color: 'var(--text-accent)' }}>{activeTagFilter.replace(/^batch:/, '')}</span>
+                  </h3>
+                  <p style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
+                    Found {taggedConversations.length} conversation{taggedConversations.length !== 1 ? 's' : ''} with {taggedMessages.length} total message{taggedMessages.length !== 1 ? 's' : ''}
+                  </p>
+                </div>
+
+                {taggedConversations.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '40px', opacity: 0.6 }}>
+                    <p>No conversations found with this tag.</p>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {taggedConversations.map(conv => {
+                      const convMessages = taggedMessages.filter(m => m.conversationId === conv.convId);
+                      return (
+                        <div
+                          key={conv.convId}
+                          onClick={() => {
+                            setActiveViewTab('conversation');
+                            handleConvClick(conv.convId);
+                          }}
+                          style={{
+                            padding: '12px',
+                            border: '1px solid var(--background-modifier-border)',
+                            borderRadius: '6px',
+                            backgroundColor: 'var(--background-secondary)',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = 'var(--background-modifier-hover)';
+                            e.currentTarget.style.borderColor = 'var(--text-accent)';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = 'var(--background-secondary)';
+                            e.currentTarget.style.borderColor = 'var(--background-modifier-border)';
+                          }}
+                        >
+                          <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '4px' }}>
+                            {conv.title || '(untitled)'}
+                          </div>
+                          <div style={{ fontSize: '12px', opacity: 0.7, marginBottom: '8px' }}>
+                            {convMessages.length} message{convMessages.length !== 1 ? 's' : ''} • {conv.vendor}
+                          </div>
+                          {convMessages.slice(0, 2).map((msg, idx) => (
+                            <div
+                              key={msg.messageId}
+                              style={{
+                                fontSize: '12px',
+                                padding: '6px',
+                                marginTop: '4px',
+                                backgroundColor: 'var(--background-primary)',
+                                borderRadius: '4px',
+                                opacity: 0.8,
+                                maxHeight: '60px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis'
+                              }}
+                            >
+                              <span style={{ fontWeight: '600', opacity: 0.7 }}>{msg.role}:</span> {msg.text.substring(0, 100)}{msg.text.length > 100 ? '...' : ''}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Tab Navigation */}
+            {(activeTagFilter || selectedConvKey) && (
+              <div style={{
+                display: 'flex',
+                gap: '8px',
+                padding: '8px 12px',
+                borderBottom: '1px solid var(--background-modifier-border)',
+                backgroundColor: 'var(--background-secondary)'
+              }}>
+                <button
+                  onClick={() => {
+                    setActiveViewTab('conversation');
+                    if (!selectedConvKey) {
+                      setActiveTagFilter(null);
+                    }
+                  }}
+                  style={{
+                    padding: '6px 12px',
+                    fontSize: '13px',
+                    fontWeight: activeViewTab === 'conversation' ? '600' : '400',
+                    border: 'none',
+                    borderRadius: '4px',
+                    background: activeViewTab === 'conversation' 
+                      ? 'var(--background-modifier-hover)' 
+                      : 'transparent',
+                    color: activeViewTab === 'conversation' 
+                      ? 'var(--text-normal)' 
+                      : 'var(--text-muted)',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  Conversation
+                  {selectedConvKey && (
+                    <span style={{ marginLeft: '6px', opacity: 0.7 }}>
+                      ({selectedConvMessages.length})
+                    </span>
+                  )}
+                </button>
+                {activeTagFilter && (
+                  <button
+                    onClick={() => setActiveViewTab('tagged')}
+                    style={{
+                      padding: '6px 12px',
+                      fontSize: '13px',
+                      fontWeight: activeViewTab === 'tagged' ? '600' : '400',
+                      border: 'none',
+                      borderRadius: '4px',
+                      background: activeViewTab === 'tagged' 
+                        ? 'var(--background-modifier-hover)' 
+                        : 'transparent',
+                      color: activeViewTab === 'tagged' 
+                        ? 'var(--text-normal)' 
+                        : 'var(--text-muted)',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <span>Tagged: {activeTagFilter.replace(/^batch:/, '')}</span>
+                    <span style={{ opacity: 0.7 }}>
+                      ({taggedMessages.length} messages, {taggedConversations.length} conversations)
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveTagFilter(null);
+                        setActiveViewTab('conversation');
+                      }}
+                      style={{
+                        marginLeft: '4px',
+                        padding: '2px 6px',
+                        fontSize: '11px',
+                        border: 'none',
+                        borderRadius: '3px',
+                        background: 'var(--background-modifier-border)',
+                        color: 'var(--text-muted)',
+                        cursor: 'pointer',
+                        opacity: 0.7
+                      }}
+                      title="Clear tag filter"
+                    >
+                      ×
+                    </button>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Tagged Messages View */}
+            {activeViewTab === 'tagged' && activeTagFilter && (
+              <div className="aihp-message-detail" style={{ padding: '16px', overflowY: 'auto', height: '100%' }}>
+                <div style={{ marginBottom: '16px' }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '8px' }}>
+                    Conversations with tag: <span style={{ color: 'var(--text-accent)' }}>{activeTagFilter.replace(/^batch:/, '')}</span>
+                  </h3>
+                  <p style={{ fontSize: '13px', opacity: 0.7, marginBottom: '12px' }}>
+                    Found {taggedConversations.length} conversation{taggedConversations.length !== 1 ? 's' : ''} with {taggedMessages.length} total message{taggedMessages.length !== 1 ? 's' : ''}
+                  </p>
+                </div>
+
+                {taggedConversations.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '40px', opacity: 0.6 }}>
+                    <p>No conversations found with this tag.</p>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {taggedConversations.map(conv => {
+                      const convMessages = taggedMessages.filter(m => m.conversationId === conv.convId);
+                      return (
+                        <div
+                          key={conv.convId}
+                          onClick={() => {
+                            setActiveViewTab('conversation');
+                            handleConvClick(conv.convId);
+                          }}
+                          style={{
+                            padding: '12px',
+                            border: '1px solid var(--background-modifier-border)',
+                            borderRadius: '6px',
+                            backgroundColor: 'var(--background-secondary)',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = 'var(--background-modifier-hover)';
+                            e.currentTarget.style.borderColor = 'var(--text-accent)';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = 'var(--background-secondary)';
+                            e.currentTarget.style.borderColor = 'var(--background-modifier-border)';
+                          }}
+                        >
+                          <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '4px' }}>
+                            {conv.title || '(untitled)'}
+                          </div>
+                          <div style={{ fontSize: '12px', opacity: 0.7, marginBottom: '8px' }}>
+                            {convMessages.length} message{convMessages.length !== 1 ? 's' : ''} • {conv.vendor}
+                          </div>
+                          {convMessages.slice(0, 2).map((msg, idx) => (
+                            <div
+                              key={msg.messageId}
+                              style={{
+                                fontSize: '12px',
+                                padding: '6px',
+                                marginTop: '4px',
+                                backgroundColor: 'var(--background-primary)',
+                                borderRadius: '4px',
+                                opacity: 0.8,
+                                maxHeight: '60px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis'
+                              }}
+                            >
+                              <span style={{ fontWeight: '600', opacity: 0.7 }}>{msg.role}:</span> {msg.text.substring(0, 100)}{msg.text.length > 100 ? '...' : ''}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Conversation View */}
+            {activeViewTab === 'conversation' && selectedConvMessages.length === 0 && !selectedConvKey && (
               <div className="flex flex-col items-center justify-center h-full text-gray-500 dark:text-gray-400">
                 <svg className="w-16 h-16 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
-                <h3 className="text-lg font-medium mb-2">No conversations selected</h3>
+                <h3 className="text-lg font-medium mb-2">No conversation selected</h3>
                 <p className="text-sm text-center max-w-sm">
-                  {isMultiSelectMode 
-                    ? "Select one or more conversations from the left to view their messages"
-                    : "Click on a conversation from the left to view its messages"
-                  }
+                  Click on a conversation from the left to view its messages
                 </p>
               </div>
             )}
 
-            {selectedConvMessages.length > 0 && (
+            {activeViewTab === 'conversation' && selectedConvKey && (
             <div className="aihp-message-detail">
               <div className="aihp-detail-header">
-                <h3>
-                  {isMultiSelectMode 
-                    ? `${selectedConversations.size} conversations selected`
-                    : selectedConvKeys.size === 1 
-                      ? (selectedConvMessages[0].title || "(untitled)")
-                      : `${selectedConvKeys.size} conversations selected`
-                  }
-                </h3>
-                <div className="aihp-detail-meta">
-                  {isMultiSelectMode
-                    ? `${selectedConvMessages.length} messages from ${selectedConversations.size} conversations`
-                    : selectedConvKeys.size === 1 
-                      ? new Date(selectedConvMessages[0].createdAt).toLocaleString()
-                      : `${selectedConvMessages.length} messages from ${selectedConvKeys.size} conversations`
-                  }
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                  <div style={{ flex: 1 }}>
+                    <h3>
+                      {selectedConvMessages[0]?.title || "(untitled)"}
+                    </h3>
+                    <div className="aihp-detail-meta">
+                      {selectedConvMessages.length > 0 && selectedConvMessages[0].createdAt && selectedConvMessages[0].createdAt > 946684800
+                        ? new Date(selectedConvMessages[0].createdAt * 1000).toLocaleString()
+                        : 'Date unavailable'}
+                      {selectedBranchPath.length > 0 && (
+                        <span style={{ marginLeft: '12px', fontSize: '11px', opacity: 0.7 }}>
+                          • Branch view active
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {hasTree && selectedConvKey && (() => {
+                    const branchPoints = getBranchPointsForConversation(selectedConvKey);
+                    const convNodes = getTreeNodesForConversation(selectedConvKey);
+                    const maxDepth = convNodes.length > 0 
+                      ? Math.max(...convNodes.map((n: any) => n.depth || 0))
+                      : 0;
+                    
+                    return branchPoints.length > 0 ? (
+                      <div style={{ 
+                        display: 'flex', 
+                        flexDirection: 'column', 
+                        gap: '4px',
+                        fontSize: '11px',
+                        opacity: 0.8,
+                        textAlign: 'right'
+                      }}>
+                        <div>🌳 {branchPoints.length} branch{branchPoints.length !== 1 ? 'es' : ''}</div>
+                        <div>📊 Depth: {maxDepth}</div>
+                        {selectedBranchPath.length > 0 && (
+                          <button
+                            onClick={() => setSelectedBranchPath([])}
+                            style={{
+                              padding: '4px 8px',
+                              fontSize: '10px',
+                              border: '1px solid var(--aihp-bg-modifier)',
+                              borderRadius: '4px',
+                              background: 'var(--aihp-bg-secondary)',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            Show all branches
+                          </button>
+                        )}
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
+                
+                {/* Branch navigation controls */}
+                {hasTree && selectedConvKey && (() => {
+                  const branchPoints = getBranchPointsForConversation(selectedConvKey);
+                  if (branchPoints.length === 0) return null;
+                  
+                  return (
+                    <div style={{ 
+                      marginTop: '8px', 
+                      padding: '8px', 
+                      background: 'var(--aihp-bg-modifier)', 
+                      borderRadius: '4px',
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '6px',
+                      fontSize: '11px'
+                    }}>
+                      <span style={{ fontWeight: 'bold', marginRight: '4px' }}>Branches:</span>
+                      {branchPoints.slice(0, 10).map((bp: any) => (
+                        <button
+                          key={bp.id}
+                          onClick={() => navigateToBranch(bp.id)}
+                          style={{
+                            padding: '4px 8px',
+                            border: selectedBranchPath.includes(bp.id) 
+                              ? '1px solid var(--aihp-accent)' 
+                              : '1px solid var(--aihp-bg-modifier)',
+                            borderRadius: '4px',
+                            background: selectedBranchPath.includes(bp.id)
+                              ? 'rgba(139, 208, 255, 0.15)'
+                              : 'var(--aihp-bg-secondary)',
+                            cursor: 'pointer',
+                            fontSize: '10px'
+                          }}
+                        >
+                          Branch at depth {bp.depth}
+                        </button>
+                      ))}
+                      {branchPoints.length > 10 && (
+                        <span style={{ opacity: 0.7 }}>+{branchPoints.length - 10} more</span>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {pagedConvTurns.map(turn => (
@@ -2139,7 +2530,9 @@ con.close()
                     <span className={`aihp-role aihp-role-${turn.role}`}>{turn.role.toUpperCase()}</span>
                     <span className="aihp-vendor aihp-vendor-chatgpt">{turn.vendor}</span>
                     <span className="aihp-turn-time">
-                      {new Date(turn.tsStart).toLocaleString()} – {new Date(turn.tsEnd).toLocaleTimeString()}
+                      {turn.tsStart && turn.tsStart > 946684800
+                        ? `${new Date(turn.tsStart * 1000).toLocaleString()} – ${turn.tsEnd && turn.tsEnd > 946684800 ? new Date(turn.tsEnd * 1000).toLocaleTimeString() : 'Invalid date'}`
+                        : 'Date unavailable'}
                     </span>
                   </div>
                   <div className="aihp-turn-messages">
@@ -2152,8 +2545,13 @@ con.close()
                           query={debouncedQuery}
                           useRegex={facets.regex}
                           highlightText={highlightText}
+                          app={plugin.app}
                         />
-                        <div className="aihp-message-meta">{new Date(msg.ts).toLocaleString()}</div>
+                        <div className="aihp-message-meta">
+                          {msg.ts && msg.ts > 946684800 
+                            ? new Date(msg.ts * 1000).toLocaleString()
+                            : 'Date unavailable'}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2176,7 +2574,8 @@ con.close()
           </LoadingOverlay>
         </section>
 
-        {/* Right Pane: Filters & Stats */}
+        {/* Right Pane: Filters & Stats (temporarily removed for more space) */}
+        {false && (
         <aside className="aip-pane aip-right">
           <div className="aip-pane-header">
             <span>Filters & Stats</span>
@@ -2198,111 +2597,219 @@ con.close()
               )}
             </div>
 
-            {/* Selected Conversations Stats */}
-            {((isMultiSelectMode && selectedConversations.size > 0) || (!isMultiSelectMode && selectedConvKeys.size > 0)) ? (
+            {/* Selected Conversation Stats */}
+            {selectedConvKey ? (
               <>
-                <h4>Selected Conversations</h4>
+                <h4>Selected Conversation</h4>
                 <div className="aip-stats" style={{ backgroundColor: 'var(--aihp-bg-modifier)', padding: '8px', borderRadius: '4px', border: '1px solid var(--aihp-accent)' }}>
                   <div style={{ color: 'var(--aihp-accent)', fontWeight: 'bold', fontSize: '14px' }}>
-                    {isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size} conversation{(isMultiSelectMode ? selectedConversations.size : selectedConvKeys.size) !== 1 ? 's' : ''} selected
+                    {selectedConvMessages[0]?.title || "(untitled)"}
                   </div>
                   <div>Messages: {selectedConvMessages.length.toLocaleString()}</div>
                   <div>Turns: {selectedConvTurns.length.toLocaleString()}</div>
                   <div>Page: {msgPage} / {msgPageCount}</div>
-                  {isMultiSelectMode && (
-                    <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--aihp-bg-modifier)' }}>
-                      <div style={{ fontSize: '12px', color: 'var(--aihp-text-muted)' }}>
-                        Multi-select mode active
+                  {hasTree && selectedConvKey && (() => {
+                    const convNodes = getTreeNodesForConversation(selectedConvKey);
+                    const branchPoints = getBranchPointsForConversation(selectedConvKey);
+                    const rootNodes = convNodes.filter((n: any) => n.is_root === 1);
+                    const maxDepth = convNodes.length > 0 
+                      ? Math.max(...convNodes.map((n: any) => n.depth || 0))
+                      : 0;
+                    const avgDepth = convNodes.length > 0
+                      ? (convNodes.reduce((sum: number, n: any) => sum + (n.depth || 0), 0) / convNodes.length).toFixed(1)
+                      : 0;
+                    
+                    return (
+                      <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--aihp-bg-modifier)' }}>
+                        <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '4px' }}>Tree Structure:</div>
+                        <div style={{ fontSize: '11px' }}>Nodes: {convNodes.length.toLocaleString()}</div>
+                        <div style={{ fontSize: '11px' }}>Roots: {rootNodes.length.toLocaleString()}</div>
+                        <div style={{ fontSize: '11px' }}>Branches: {branchPoints.length.toLocaleString()}</div>
+                        <div style={{ fontSize: '11px' }}>Max depth: {maxDepth}</div>
+                        <div style={{ fontSize: '11px' }}>Avg depth: {avgDepth}</div>
+                        {selectedBranchPath.length > 0 && (
+                          <div style={{ fontSize: '10px', opacity: 0.7, marginTop: '4px' }}>
+                            Branch view: {selectedBranchPath.length} nodes
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               </>
             ) : null}
 
-            <h4>Vendor Breakdown</h4>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <h4 style={{ margin: 0 }}>Vendor Breakdown</h4>
+              <button 
+                onClick={() => setVendorMode(vendorMode === 'folder' ? 'company' : 'folder')}
+                style={{
+                  fontSize: '11px',
+                  padding: '4px 8px',
+                  border: '1px solid var(--aihp-bg-modifier)',
+                  borderRadius: '4px',
+                  background: 'var(--aihp-bg-secondary)',
+                  color: 'var(--aihp-text)',
+                  cursor: 'pointer'
+                }}
+              >
+                {vendorMode === 'folder' ? 'Show Companies' : 'Show Source Folders'}
+              </button>
+            </div>
             <div className="aip-vendor-stats">
               {Object.entries(
                 filteredMessages.reduce((acc: Record<string, number>, msg: any) => {
-                  // Use the normalized vendor field (should always be CHATGPT, CLAUDE, etc.)
-                  // Do NOT use msg.title, msg.sourceId, or any other field - only msg.vendor
-                  const vendorKey = msg.vendor || 'CHATGPT';
-                  
-                  // Only count valid vendor names (uppercase, no spaces)
-                  if (vendorKey && vendorKey.toUpperCase() === vendorKey && !vendorKey.includes(' ')) {
-                    acc[vendorKey] = (acc[vendorKey] || 0) + 1;
+                  if (vendorMode === 'company') {
+                    // Company vendor mode
+                    const valid = new Set(['CHATGPT','CLAUDE','GEMINI','GROK']);
+                    const v = (msg.vendor||'').toUpperCase();
+                    const key = valid.has(v) ? v : 'CHATGPT';
+                    acc[key] = (acc[key]||0)+1;
+                  } else {
+                    // Folder mode: lookup folder_path from groupedByConversation
+                    const conv = groupedByConversation.find(g => g.convId === msg.conversationId);
+                    const fp = (conv?.folder_path || msg.folder_path || msg.source_file || '').toString();
+                    const parts = fp.split(/[\\/]/).filter(Boolean);
+                    const tail = parts.slice(-1)[0] || 'unknown';
+                    acc[tail] = (acc[tail]||0)+1;
                   }
-                  
                   return acc;
                 }, {} as Record<string, number>)
               )
-              .filter(([vendor]) => {
-                // Only show valid vendor names: CHATGPT, CLAUDE, GEMINI, GROK
-                const validVendors = ['CHATGPT', 'CLAUDE', 'GEMINI', 'GROK'];
-                return validVendors.includes(vendor.toUpperCase());
-              })
               .sort(([, a], [, b]) => b - a) // Sort by count descending
               .slice(0, 20) // Limit to top 20
-              .map(([vendor, count]) => {
-                // Map vendor codes to user-friendly names
-                const vendorUpper = vendor.toUpperCase();
-                const vendorDisplay = vendorUpper === 'CHATGPT' ? 'ChatGPT' :
-                                    vendorUpper === 'CLAUDE' ? 'Claude' :
-                                    vendorUpper === 'GEMINI' ? 'Gemini' :
-                                    vendorUpper === 'GROK' ? 'Grok' :
-                                    vendorUpper;
+              .map(([key, count]) => {
+                if (vendorMode === 'company') {
+                  // Map vendor codes to user-friendly names
+                  const vendorUpper = key.toUpperCase();
+                  const vendorDisplay = vendorUpper === 'CHATGPT' ? 'ChatGPT' :
+                                      vendorUpper === 'CLAUDE' ? 'Claude' :
+                                      vendorUpper === 'GEMINI' ? 'Gemini' :
+                                      vendorUpper === 'GROK' ? 'Grok' :
+                                      vendorUpper;
+                  
+                  const vendorFilter = vendorUpper === 'CHATGPT' ? 'chatgpt' :
+                                     vendorUpper === 'CLAUDE' ? 'claude' :
+                                     vendorUpper === 'GEMINI' ? 'gemini' :
+                                     vendorUpper === 'GROK' ? 'grok' :
+                                     vendorUpper.toLowerCase();
                 
-                const vendorFilter = vendorUpper === 'CHATGPT' ? 'chatgpt' :
-                                   vendorUpper === 'CLAUDE' ? 'claude' :
-                                   vendorUpper === 'GEMINI' ? 'gemini' :
-                                   vendorUpper === 'GROK' ? 'grok' :
-                                   vendorUpper.toLowerCase();
-                
-                return (
-                  <div 
-                    key={vendor} 
-                    className="aip-vendor-item" 
-                    style={{ 
-                      cursor: 'pointer', 
-                      padding: '6px 10px', 
-                      borderRadius: '4px', 
-                      transition: 'background 0.2s',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: '4px',
-                      border: facets.vendor === vendorFilter ? '1px solid var(--aihp-accent)' : '1px solid transparent'
-                    }}
-                    onClick={() => {
-                      // Toggle filter by this vendor
-                      setFacets(prev => ({ 
-                        ...prev, 
-                        vendor: (prev.vendor === vendorFilter) ? 'all' : vendorFilter as any 
-                      }));
-                    }}
-                    onMouseEnter={(e) => {
-                      if (facets.vendor !== vendorFilter) {
+                  return (
+                    <div 
+                      key={key} 
+                      className="aip-vendor-item" 
+                      style={{ 
+                        cursor: 'pointer', 
+                        padding: '6px 10px', 
+                        borderRadius: '4px', 
+                        transition: 'background 0.2s',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '4px',
+                        border: facets.vendor === vendorFilter ? '1px solid var(--aihp-accent)' : '1px solid transparent'
+                      }}
+                      onClick={() => {
+                        // Toggle filter by this vendor
+                        setFacets(prev => ({ 
+                          ...prev, 
+                          vendor: (prev.vendor === vendorFilter) ? 'all' : vendorFilter as any 
+                        }));
+                      }}
+                      onMouseEnter={(e) => {
+                        if (facets.vendor !== vendorFilter) {
+                          (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(255,255,255,0.05)';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (facets.vendor !== vendorFilter) {
+                          (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent';
+                        }
+                      }}
+                      title={`Click to ${facets.vendor === vendorFilter ? 'clear filter' : 'filter by'} ${vendorDisplay}`}
+                    >
+                      <span className="aip-vendor-name">{vendorDisplay}</span>
+                      <span className="aip-vendor-count">{count.toLocaleString()}</span>
+                </div>
+                  );
+                } else {
+                  // Folder mode: show folder name, clickable to filter
+                  return (
+                    <div 
+                      key={key} 
+                      className="aip-vendor-item" 
+                      style={{ 
+                        cursor: 'pointer', 
+                        padding: '6px 10px', 
+                        borderRadius: '4px', 
+                        transition: 'background 0.2s',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '4px',
+                        border: '1px solid transparent'
+                      }}
+                      onClick={() => {
+                        // TODO: Add folder-based filtering if needed
+                      }}
+                      onMouseEnter={(e) => {
                         (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(255,255,255,0.05)';
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      if (facets.vendor !== vendorFilter) {
+                      }}
+                      onMouseLeave={(e) => {
                         (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent';
-                      }
-                    }}
-                    title={`Click to ${facets.vendor === vendorFilter ? 'clear filter' : 'filter by'} ${vendorDisplay}`}
-                  >
-                    <span className="aip-vendor-name">{vendorDisplay}</span>
-                    <span className="aip-vendor-count">{count.toLocaleString()}</span>
-                  </div>
-                );
+                      }}
+                      title={`Folder: ${key}`}
+                    >
+                      <span className="aip-vendor-name">{key}</span>
+                      <span className="aip-vendor-count">{count.toLocaleString()}</span>
+                    </div>
+                  );
+                }
               })}
             </div>
 
 
           </div>
         </aside>
+        )}
       </div>
+      )}
+      
+      {/* Database Manager Modal */}
+      {showDatabaseManager && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          zIndex: 10000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px'
+        }} onClick={() => setShowDatabaseManager(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            backgroundColor: 'var(--background-primary)',
+            borderRadius: '8px',
+            maxWidth: '900px',
+            maxHeight: '90vh',
+            overflow: 'auto',
+            boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
+            width: '100%'
+          }}>
+            <DatabaseManager
+              plugin={plugin}
+              app={plugin.app}
+              onClose={() => {
+                setShowDatabaseManager(false);
+                // Refresh after import
+                refreshFromDB();
+              }}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

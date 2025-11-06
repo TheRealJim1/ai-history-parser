@@ -176,6 +176,9 @@
 .static {
   position: static;
 }
+.fixed {
+  position: fixed;
+}
 .absolute {
   position: absolute;
 }
@@ -212,8 +215,14 @@
 .inline-block {
   display: inline-block;
 }
+.inline {
+  display: inline;
+}
 .flex {
   display: flex;
+}
+.inline-flex {
+  display: inline-flex;
 }
 .\!table {
   display: table !important;
@@ -494,6 +503,9 @@
   --tw-text-opacity:1;
   color: rgb(255 255 255/var(--tw-text-opacity,1));
 }
+.underline {
+  text-decoration-line: underline;
+}
 .opacity-50 {
   opacity: .5;
 }
@@ -505,6 +517,10 @@
     var(--tw-ring-shadow,0 0 #0000),
     var(--tw-shadow);
 }
+.blur {
+  --tw-blur:blur(8px);
+}
+.blur,
 .filter {
   filter: var(--tw-blur) var(--tw-brightness) var(--tw-contrast) var(--tw-grayscale) var(--tw-hue-rotate) var(--tw-invert) var(--tw-saturate) var(--tw-sepia) var(--tw-drop-shadow);
 }
@@ -537,9 +553,6 @@
 }
 .duration-200 {
   transition-duration: .2s;
-}
-.\[i\:i\+batch_size\] {
-  i: i+batch size;
 }
 .pill {
   border-radius: 9999px;

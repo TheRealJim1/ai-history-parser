@@ -13,7 +13,7 @@ export const DEFAULT_SETTINGS: ParserSettings = {
   recentFolders: [],
   // Python Pipeline defaults
   pythonPipeline: {
-    dbPath: "C:\\Dev\\ai-history-parser\\ai_history.db",
+    dbPath: "C:\\Dev\\ai-history-parser\\chatgpt_clean.db",
     pythonExecutable: "python",
     scriptsRoot: "C:\\Dev\\ai-history-parser",
     mediaSourceFolder: "C:\\Dev\\ai-history-parser\\media",

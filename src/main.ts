@@ -1,6 +1,8 @@
 
 import { Plugin, WorkspaceLeaf, PluginSettingTab, Setting, Notice, TFile } from "obsidian";
 import { DEFAULT_SETTINGS, validateFolderPath, sanitizeFolderPath, migrateLegacySettings } from "./settings";
+import { VIEW_TYPE_REIMPORT_LOG, ReimportLogView } from "./reimport-log-view";
+import { ReimportRunner } from "./run-reimport";
 import { ParserView, VIEW_TYPE } from "./view";
 import { statusBus } from "./ui/status";
 import type { ParserSettings } from "./types";
@@ -33,6 +35,8 @@ export default class AIHistoryParser extends Plugin {
     } catch { /* if status bar plugin is disabled, no problem */ }
 
     this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ParserView(leaf, this));
+    // Register reimport log view
+    this.registerView(VIEW_TYPE_REIMPORT_LOG, (leaf: WorkspaceLeaf) => new ReimportLogView(leaf));
 
     const open = async () => {
       const leaf = this.app.workspace.getRightLeaf(false);
@@ -46,7 +50,23 @@ export default class AIHistoryParser extends Plugin {
     };
 
     this.addRibbonIcon("blocks", "AI History Parser", open);
+    this.addRibbonIcon("play", "Reset & Re‑import (Folder‑Ordered)", async () => {
+      const runner = new ReimportRunner(this.app, this.settings, this.manifest.dir);
+      await runner.run({ reset: true });
+    });
     this.addCommand({ id: "aihp-open", name: "Open AI History Parser", callback: open });
+    this.addCommand({ id: "aihp-reimport-reset", name: "Reset & Re‑import (Folder‑Ordered)", callback: async () => {
+      const runner = new ReimportRunner(this.app, this.settings, this.manifest.dir);
+      await runner.run({ reset: true });
+    }});
+    this.addCommand({ id: "aihp-reimport", name: "Re‑import (Folder‑Ordered, no reset)", callback: async () => {
+      const runner = new ReimportRunner(this.app, this.settings, this.manifest.dir);
+      await runner.run({ reset: false });
+    }});
+    this.addCommand({ id: "aihp-reimport-dryrun", name: "Dry‑run Re‑import (no writes)", callback: async () => {
+      const runner = new ReimportRunner(this.app, this.settings, this.manifest.dir);
+      await runner.run({ reset: false, dryRun: true });
+    }});
     this.addCommand({ id: "aihp-popout", name: "Open AI History Parser (Pop-out)", callback: openPopout });
     this.addCommand({ id: "aihp-rebuild-ids", name: "Rebuild Stable IDs", callback: () => this.rebuildStableIds() });
     this.addCommand({ id: "aihp-reindex", name: "Reindex Search", callback: () => this.reindexSearch() });
@@ -257,6 +277,7 @@ export default class AIHistoryParser extends Plugin {
 
   async onunload() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach(l => l.detach());
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_REIMPORT_LOG).forEach(l => l.detach());
   }
 
   async saveSettings() { 
@@ -450,9 +471,9 @@ class AHPSettingsTab extends PluginSettingTab {
     // Database Path
     new Setting(containerEl)
       .setName('Database Path')
-      .setDesc('SQLite database path (supports <vault> token for vault-relative paths)')
+      .setDesc('SQLite database path (supports <vault> token for vault-relative paths). Use chatgpt_v2_tree.db for tree-aware schema with conversation_nodes table.')
       .addText(text => text
-        .setPlaceholder('C:\\Dev\\ai-history-parser\\ai_history.db')
+        .setPlaceholder('C:\\Dev\\ai-history-parser\\chatgpt_v2_tree.db')
         .setValue(pp.dbPath)
         .onChange(async (value) => {
           pp.dbPath = value;

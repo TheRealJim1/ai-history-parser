@@ -14,7 +14,7 @@
     "1b25f0c3a7df2ba1e7217e03f1345307ef35364fb6467bf25633d1bed5a6bd02-2025-10-20-13-48-33-9ea6d82af38e4d06b7390c86a698a56d"
   ],
   "pythonPipeline": {
-    "dbPath": "C:\\Dev\\ai-history-parser\\ai_history.db",
+    "dbPath": "C:\\Dev\\ai-history-parser\\chatgpt_clean.db",
     "pythonExecutable": "python",
     "scriptsRoot": "C:\\Dev\\ai-history-parser",
     "mediaSourceFolder": "C:\\Dev\\ai-history-parser\\media",

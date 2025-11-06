@@ -124,7 +124,7 @@
   color: var(--aihp-text-muted);
 }
 
-.aip-left { 
+.aip-left {
   position: relative;
   overflow: hidden;
 }
@@ -1045,6 +1045,72 @@
   font-size: 11px;
   color: var(--aihp-text-muted);
   margin-top: 4px;
+}
+
+/* Code block styling in message content */
+.aihp-message-content pre,
+.aihp-message-content code {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.aihp-message-content pre {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0;
+  overflow-x: auto;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4),
+              0 1px 2px rgba(0, 0, 0, 0.3);
+  position: relative;
+}
+
+.aihp-message-content code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Inline code should not have large padding */
+.aihp-message-content pre code {
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+/* Dark theme code block styling */
+.theme-dark .aihp-message-content pre,
+body.theme-dark .aihp-message-content pre {
+  background: rgba(0, 0, 0, 0.4);
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5),
+              0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.theme-dark .aihp-message-content code,
+body.theme-dark .aihp-message-content code {
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* Light theme code block styling */
+.theme-light .aihp-message-content pre,
+body.theme-light .aihp-message-content pre {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15),
+              0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.theme-light .aihp-message-content code,
+body.theme-light .aihp-message-content code {
+  background: rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
 .aihp-empty {
