@@ -1,7 +1,7 @@
 
 import React from 'react';
 import type { App as ObApp } from 'obsidian';
-import { AHPDB } from '../db/sqlite';
+import { AHPDB } from '../providers/db/sqlite';
 import { indexFolderIntoDB } from '../controller/importFlow';
 
 type Row = { id:number; ext_id:string; source:string; title:string; started_at:number; updated_at:number };

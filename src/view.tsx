@@ -1,9 +1,10 @@
-﻿import { ItemView, Modal, TAbstractFile, WorkspaceLeaf, TFolder, TFile } from "obsidian";
+﻿import { ItemView, Modal, TAbstractFile, WorkspaceLeaf, TFolder, TFile, Notice } from "obsidian";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { parseMultipleSources, searchMessages, highlightText } from "./parser";
 import { SearchWithHistory } from "./components/SearchWithHistory";
 import { executePythonScript, buildSyncCommand, buildAnnotateCommand, buildExportCommand } from "./utils/scriptRunner";
+import { exportSearchResults } from "./utils/exportSearch";
 import { resolveVaultPath } from "./settings";
 import { safeJson, mapAnnotationRow, type ConversationAnnotation, hasAnyAnnotations } from "./utils/jsonUtils";
 import { exportEdgesOnly } from "./utils/graphExport";
@@ -15,6 +16,7 @@ import { TestWizard } from "./components/TestWizard";
 import { discoverSubfolders, getSourceLabel, formatSourcePath, type DiscoveredSubfolder } from "./utils/folderDiscovery";
 import { detectVendor, generateSourceId, pickColor, makeSourceLabel, parseExportInfo } from "./settings";
 import { MessageContent } from "./components/ToolBlock";
+import { CollectionGripper } from "./components/CollectionGripper";
 import { HeaderProgress } from "./ui/HeaderProgress";
 import { Paginator } from "./components/Paginator";
 import { usePagination } from "./hooks/usePagination";
@@ -30,6 +32,11 @@ import { LoadingSpinner, LoadingOverlay, LoadingButton } from "./ui/LoadingSpinn
 import { ConversationCard } from "./ui/ConversationCard";
 import { ConversationsList } from "./ui/ConversationsList";
 import { DatabaseManager } from "./components/DatabaseManager";
+import { CollectionPanel, useCollectionPanel, CollectionProvider, type Collection } from "./ui/CollectionPanel";
+import { LoadingScreen, type LoadingStep } from "./ui/LoadingScreen";
+import { AttachmentGallery } from "./ui/AttachmentGallery";
+import { AttachmentViewer, type Attachment } from "./ui/AttachmentViewer";
+// import { LMStudioManager } from "./components/LMStudioManager"; // Reserved for future action
 import type { FlatMessage, Source, Vendor, SearchFacets, SearchProgress, ParseError } from "./types";
 import type AIHistoryParser from "./main";
 
@@ -63,6 +70,7 @@ export class ParserView extends ItemView {
     // Version banner for debugging
     console.info("AIHP View opened - DB-first mode active");
     
+    // Render UI immediately - loading will be deferred inside the component
     this.root.render(<UI plugin={this.plugin} viewInstance={this} />);
   }
 
@@ -240,7 +248,7 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     regex: false
   });
   const [selectedMessage, setSelectedMessage] = useState<FlatMessage | null>(null);
-  
+
   // Tree navigation state
   const [treeNodes, setTreeNodes] = useState<any[]>([]);
   const [hasTree, setHasTree] = useState(false);
@@ -251,7 +259,14 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
   
   // Tag filtering state
   const [activeTagFilter, setActiveTagFilter] = useState<string | null>(null);
-  const [activeViewTab, setActiveViewTab] = useState<'conversation' | 'tagged'>('conversation');
+  const [activeViewTab, setActiveViewTab] = useState<'conversation' | 'tagged' | 'attachments'>('conversation');
+  
+  // Attachment filtering state
+  const [attachmentFilter, setAttachmentFilter] = useState<'all' | 'has' | 'missing' | 'remote'>('all');
+  const [conversationAttachments, setConversationAttachments] = useState<any[]>([]);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const [showAttachmentGallery, setShowAttachmentGallery] = useState(false);
+  const [selectedAttachment, setSelectedAttachment] = useState<any | null>(null);
 
   // Local state for messages and database
   const [messages, setMessages] = useState<FlatMessage[]>([]);
@@ -300,19 +315,19 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     let filtered: FlatMessage[];
     
     // Apply facet filters (vendor, role, date, sources)
-    filtered = messages.filter(msg => {
-      if (facets.vendor && facets.vendor !== 'all' && msg.vendor !== facets.vendor) return false;
-      if (facets.role && facets.role !== 'any' && msg.role !== facets.role) return false;
+      filtered = messages.filter(msg => {
+        if (facets.vendor && facets.vendor !== 'all' && msg.vendor !== facets.vendor) return false;
+        if (facets.role && facets.role !== 'any' && msg.role !== facets.role) return false;
       if (facets.from && msg.createdAt && msg.createdAt < new Date(facets.from).getTime()) return false;
       if (facets.to && msg.createdAt && msg.createdAt > new Date(facets.to).getTime() + 86400000) return false;
-      // Only filter by activeSources if there are active sources selected
-      if (activeSources.size > 0 && !activeSources.has(msg.sourceId)) return false;
-      return true;
-    });
+        // Only filter by activeSources if there are active sources selected
+        if (activeSources.size > 0 && !activeSources.has(msg.sourceId)) return false;
+        return true;
+      });
     
     // If search query was provided, messages are already ranked by FTS5 from DB
     // Sort by FTS5 rank if available, otherwise by date
-    if (debouncedQuery.trim()) {
+      if (debouncedQuery.trim()) {
       filtered.sort((a, b) => {
         const aRank = (a as any).fts_rank || 0;
         const bRank = (b as any).fts_rank || 0;
@@ -379,7 +394,7 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
 
     // Get annotation map for outlier/attachment counts
     const annotationMap = (setMessages as any).__annotations || new Map();
-    
+
     const result = index.map(conv => {
       // Temporarily disable auto-tagging (dom:/ent:/lang:) to reduce noise.
       // Keep only batch label so exports remain distinguishable.
@@ -416,6 +431,9 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
       const annotation = annotationMap.get(conv.convId);
       const outlierCount = (annotation as any)?.outlier_count || 0;
       const attachmentCount = (annotation as any)?.attachment_count || 0;
+      const attachmentBlobCount = (annotation as any)?.attachment_blob_count || 0;
+      const attachmentRemoteCount = (annotation as any)?.attachment_remote_count || 0;
+      const attachmentMissingCount = (annotation as any)?.attachment_missing_count || 0;
       // Auto-tags (fast wins) — keep outlier, remove attach for now (too noisy)
       if (outlierCount > 0) tags.push(`outlier:${outlierCount}`);
       
@@ -432,7 +450,10 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
         folder_path: folderPathByConv.get(conv.convId) || "",  // Include folder_path from messages
         meta: convMeta,  // Include meta for pairing information
         outlierCount,  // Include outlier count from database
-        attachmentCount  // Include attachment count from database
+        attachmentCount,  // Include attachment count from database
+        attachmentBlobCount,
+        attachmentRemoteCount,
+        attachmentMissingCount
       };
     });
     
@@ -464,6 +485,29 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
 
   // Selected conversation (single-select only)
   const [selectedConvKey, setSelectedConvKey] = useState<string | null>(null);
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+  const [selectedConversations, setSelectedConversations] = useState<Set<string>>(new Set());
+  const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
+  
+  // Message selection state for collections
+  const [isMessageSelectMode, setIsMessageSelectMode] = useState(false);
+  const [selectedMessages, setSelectedMessages] = useState<Set<string>>(new Set());
+  const [selectedTextSelections, setSelectedTextSelections] = useState<Map<string, string>>(new Map());
+  
+  // Collections context (synced via provider)
+  const { collections, addToCollection, setCollections, usingDatabase } = useCollectionPanel();
+  
+  // Collection gripper state
+  const [gripperState, setGripperState] = useState<{
+    show: boolean;
+    text: string;
+    position: { x: number; y: number };
+  }>({ show: false, text: '', position: { x: 0, y: 0 } });
+  
+  // Loading screen state
+  const [loadingSteps, setLoadingSteps] = useState<LoadingStep[]>([]);
+  const [showLoadingScreen, setShowLoadingScreen] = useState(false);
+  const [showDevInfo, setShowDevInfo] = useState(false);
   const [useNewView, setUseNewView] = useState(false);
   
   // Pagination for conversation list
@@ -535,11 +579,42 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     });
   }, [messages.length, filteredMessages.length, groupedByConversation.length, pagedConversations.length, activeSources.size]);
 
-  // Handle conversation selection (single-select only)
-  const handleConvClick = (convKey: string) => {
-    console.log("🔄 Conversation clicked:", convKey);
-    setSelectedConvKey(convKey);
-    setSelectedBranchPath([]); // Reset branch path when selecting new conversation
+  // Handle conversation selection (single-select or multi-select)
+  const handleConvClick = (convKey: string, index?: number, shiftKey?: boolean) => {
+    console.log("🔄 Conversation clicked:", convKey, "multi-select:", isMultiSelectMode, "shift:", shiftKey);
+    
+    if (isMultiSelectMode) {
+      if (shiftKey && lastSelectedIndex !== null && index !== undefined) {
+        // Range selection
+        const start = Math.min(lastSelectedIndex, index);
+        const end = Math.max(lastSelectedIndex, index);
+        const range = pagedConversations.slice(start, end + 1).map(c => c.convId).filter(Boolean);
+        setSelectedConversations(prev => {
+          const next = new Set(prev);
+          range.forEach(id => next.add(id));
+          return next;
+        });
+        setLastSelectedIndex(index);
+        } else {
+        // Toggle single conversation
+        setSelectedConversations(prev => {
+          const next = new Set(prev);
+          if (next.has(convKey)) {
+            next.delete(convKey);
+          } else {
+            next.add(convKey);
+          }
+          return next;
+        });
+        if (index !== undefined) {
+          setLastSelectedIndex(index);
+        }
+      }
+    } else {
+      // Single-select mode
+      setSelectedConvKey(convKey);
+      setSelectedBranchPath([]); // Reset branch path when selecting new conversation
+    }
   };
 
   // Filter conversations by tag
@@ -611,9 +686,32 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
       }
     }
 
+    // Filter by attachment status if attachment filter is active
+    if (attachmentFilter !== 'all' && conversationAttachments.length > 0) {
+      const messageIdsWithAttachments = new Set(
+        conversationAttachments
+          .filter(att => {
+            if (attachmentFilter === 'has') return att.storage_status === 'filesystem';
+            if (attachmentFilter === 'missing') return att.storage_status === 'missing';
+            if (attachmentFilter === 'remote') return att.storage_status === 'remote';
+            return true;
+          })
+          .map(att => att.message_id)
+          .filter(Boolean)
+      );
+      
+      if (messageIdsWithAttachments.size > 0) {
+        selected = selected.filter(m => messageIdsWithAttachments.has(m.messageId));
+        console.log(`🔄 Filtered by attachments (${attachmentFilter}): ${selected.length} messages`);
+      } else if (attachmentFilter === 'has') {
+        // No messages with attachments match the filter
+        selected = [];
+      }
+    }
+
     console.log("🔄 Selected messages:", selected.length);
     return selected;
-  }, [filteredMessages, selectedConvKey, hasTree, selectedBranchPath, treeNodes]);
+  }, [filteredMessages, selectedConvKey, hasTree, selectedBranchPath, treeNodes, attachmentFilter, conversationAttachments]);
 
   // Group messages into turns for better display
   const selectedConvTurns = useMemo(() => {
@@ -727,7 +825,7 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
   
   // Refresh from DB - reads from external database (defined first for loadMessages)
   // Supports FTS5 search when searchQuery is provided
-  const refreshFromDB = useCallback(async (searchQueryOverride?: string) => {
+  const refreshFromDB = useCallback(async (searchQueryOverride?: string, showLoading: boolean = true) => {
     const { pythonPipeline } = plugin.settings;
     
     if (!pythonPipeline?.dbPath) {
@@ -737,6 +835,28 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
 
     setMessagesLoading(true);
     setStatus("loading");
+    // Only show loading screen for non-search operations (initial load, manual refresh, etc.)
+    if (showLoading) {
+      setShowLoadingScreen(true);
+    }
+    
+    // Initialize loading steps
+    const initialSteps: LoadingStep[] = [
+      { name: "Checking database file", status: 'pending' },
+      { name: "Connecting to database", status: 'pending' },
+      { name: "Querying conversations", status: 'pending' },
+      { name: "Loading messages", status: 'pending' },
+      { name: "Processing tree structure", status: 'pending' },
+      { name: "Finalizing data", status: 'pending' }
+    ];
+    setLoadingSteps(initialSteps);
+    
+    // Helper to update loading steps
+    const updateStep = (stepName: string, updates: Partial<LoadingStep>) => {
+      setLoadingSteps(prev => prev.map(s => 
+        s.name === stepName ? { ...s, ...updates } : s
+      ));
+    };
     
     // Use searchQueryOverride if provided, otherwise use current debouncedQuery
     const queryToUse = searchQueryOverride !== undefined ? searchQueryOverride : debouncedQuery;
@@ -749,13 +869,25 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
       const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
       const dbPath = resolveVaultPath(pythonPipeline.dbPath, vaultBasePath);
       
-              // Check if DB exists first
+      // Step 1: Check database file
+      updateStep("Checking database file", { status: 'loading', message: `Checking: ${dbPath}` });
+      console.log("🔄 [Step 1/6] Checking database file:", dbPath);
+      
+      // Check if DB exists first
       const { spawn } = require("child_process");
       const fs = require("fs");
       if (!fs.existsSync(dbPath)) {
+        updateStep("Checking database file", { status: 'error', message: 'Database not found' });
         progressHandle.fail("Database not found");
         throw new Error(`Database not found: ${dbPath}. Please configure the database path in settings.`);
       }
+      
+      updateStep("Checking database file", { status: 'complete', message: 'Database file found' });
+      console.log("✅ [Step 1/6] Database file found");
+      
+      // Step 2: Connecting to database
+      updateStep("Connecting to database", { status: 'loading', message: 'Initializing connection...' });
+      console.log("🔄 [Step 2/6] Connecting to database");
       
       // Use external query script that auto-detects schema (old vs new)
       const path = require("path");
@@ -767,9 +899,17 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
       
       // Check if query script exists, fallback to inline script if not
       if (!fs.existsSync(queryScriptPath)) {
+        updateStep("Connecting to database", { status: 'error', message: 'Query script not found' });
         progressHandle.fail("Query script not found");
         throw new Error(`Query script not found: ${queryScriptPath}. Please ensure tools/obsidian_query_script_v2.py exists.`);
       }
+      
+      updateStep("Connecting to database", { status: 'complete', message: 'Connection established' });
+      console.log("✅ [Step 2/6] Database connection established");
+      
+      // Step 3: Querying conversations
+      updateStep("Querying conversations", { status: 'loading', message: 'Executing query script...' });
+      console.log("🔄 [Step 3/6] Executing query script");
       
       // Execute query script with database path and optional search query
       // Use shell:false since we're passing args as an array
@@ -792,6 +932,8 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
       
       let stdout = '';
       let stderr = '';
+      let conversationCount = 0;
+      let totalConversations = 0;
       
       proc.stdout.on('data', (data: Buffer) => {
         stdout += data.toString();
@@ -805,18 +947,30 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
         const lines = text.split('\n');
         for (const line of lines) {
           if (line.startsWith('PROGRESS:TOTAL:')) {
-            const total = parseInt(line.split(':')[2], 10);
-            if (!isNaN(total)) {
-              progressHandle.setTotal(total);
-              progressHandle.label("Loading conversations...", `0/${total} conversations`);
+            totalConversations = parseInt(line.split(':')[2], 10);
+            if (!isNaN(totalConversations)) {
+              progressHandle.setTotal(totalConversations);
+              progressHandle.label("Loading conversations...", `0/${totalConversations} conversations`);
+              updateStep("Querying conversations", { 
+                status: 'loading', 
+                message: `Found ${totalConversations} conversations`,
+                progress: 0,
+                total: totalConversations
+              });
             }
           } else if (line.startsWith('PROGRESS:TICK:')) {
             const parts = line.split(':');
             if (parts.length >= 4) {
-              const current = parseInt(parts[2], 10);
+              conversationCount = parseInt(parts[2], 10);
               const total = parseInt(parts[3], 10);
-              if (!isNaN(current) && !isNaN(total)) {
-                progressHandle.set(current, `${current}/${total} conversations`);
+              if (!isNaN(conversationCount) && !isNaN(total)) {
+                progressHandle.set(conversationCount, `${conversationCount}/${total} conversations`);
+                updateStep("Querying conversations", { 
+                  status: 'loading', 
+                  message: `Processing ${conversationCount}/${total} conversations`,
+                  progress: conversationCount,
+                  total: total
+                });
               }
             }
           }
@@ -827,7 +981,18 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
         proc.on('close', (code: number) => {
           if (code === 0) {
             try {
+              updateStep("Querying conversations", { status: 'complete', message: `Loaded ${conversationCount || 'all'} conversations` });
+              console.log("✅ [Step 3/6] Conversations queried");
+              
+              // Step 4: Loading messages
+              updateStep("Loading messages", { status: 'loading', message: 'Parsing message data...' });
+              console.log("🔄 [Step 4/6] Parsing message data");
+              
               const data = JSON.parse(stdout);
+              
+              // Step 5: Processing tree structure
+              updateStep("Processing tree structure", { status: 'loading', message: 'Analyzing tree data...' });
+              console.log("🔄 [Step 5/6] Processing tree structure");
               
               // Store tree structure if available (for tree visualization)
               const hasTree = data.hasTree || false;
@@ -840,13 +1005,15 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
                 (window as any).__aihp_has_tree = true;
                 setTreeNodes(treeNodes);
                 setHasTree(true);
-                console.log(`✅ Tree structure loaded: ${treeNodes.length} nodes, schema: ${schema}`);
+                updateStep("Processing tree structure", { status: 'complete', message: `${treeNodes.length} nodes loaded` });
+                console.log(`✅ [Step 5/6] Tree structure loaded: ${treeNodes.length} nodes, schema: ${schema}`);
               } else {
                 (window as any).__aihp_tree_nodes = [];
                 (window as any).__aihp_has_tree = false;
                 setTreeNodes([]);
                 setHasTree(false);
-                console.log(`ℹ️ No tree structure available (schema: ${schema})`);
+                updateStep("Processing tree structure", { status: 'complete', message: 'No tree structure available' });
+                console.log(`✅ [Step 5/6] No tree structure available (schema: ${schema})`);
               }
               
               // Map provider to source.id for filtering
@@ -931,9 +1098,12 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
                     (row as any).meta = {};
                   }
                 }
-                // Include outlier_count and attachment_count
+                // Include outlier_count and attachment counts
                 if (c.outlier_count !== undefined) (row as any).outlier_count = c.outlier_count || 0;
                 if (c.attachment_count !== undefined) (row as any).attachment_count = c.attachment_count || 0;
+                if (c.attachment_blob_count !== undefined) (row as any).attachment_blob_count = c.attachment_blob_count || 0;
+                if (c.attachment_remote_count !== undefined) (row as any).attachment_remote_count = c.attachment_remote_count || 0;
+                if (c.attachment_missing_count !== undefined) (row as any).attachment_missing_count = c.attachment_missing_count || 0;
                 return row;
               });
               
@@ -944,11 +1114,27 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
               // Store in state (we'll use this for annotation display)
               (setMessages as any).__annotations = annotationMap;
               
+              updateStep("Loading messages", { status: 'complete', message: `Parsed ${flatMessages.length} messages` });
+              console.log("✅ [Step 4/6] Messages loaded");
+              
+              // Step 6: Finalizing data
+              updateStep("Finalizing data", { status: 'loading', message: 'Updating UI state...' });
+              console.log("🔄 [Step 6/6] Finalizing data");
+              
               setMessages(flatMessages);
-      setStatus("ready");
+              setStatus("ready");
               setError("");
               progressHandle.end();
-              console.log(`✅ Refreshed ${flatMessages.length} messages from DB, ${conversations.length} conversations with annotations`);
+              
+              updateStep("Finalizing data", { status: 'complete', message: `${flatMessages.length} messages, ${conversations.length} conversations` });
+              console.log(`✅ [Step 6/6] Refreshed ${flatMessages.length} messages from DB, ${conversations.length} conversations with annotations`);
+              
+              // Hide loading screen after a brief delay (only if it was shown)
+              if (showLoading) {
+                setTimeout(() => {
+                  setShowLoadingScreen(false);
+                }, 500);
+              }
     } catch (e: any) {
               progressHandle.fail(`Failed to parse DB response: ${e.message}`);
               reject(new Error(`Failed to parse DB response: ${e.message}`));
@@ -972,6 +1158,21 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
       console.error("❌ Refresh failed:", error);
       setError(`Refresh failed: ${error.message}`);
       setStatus("error");
+      
+      // Hide loading screen if it was shown
+      if (showLoading) {
+        setShowLoadingScreen(false);
+      }
+      
+      // Mark current step as error
+      const currentStep = loadingSteps.find(s => s.status === 'loading');
+      if (currentStep) {
+        setLoadingSteps(prev => prev.map(s => 
+          s.name === currentStep.name ? { ...s, status: 'error' as const, message: error.message } : s
+        ));
+      }
+      
+      // Don't hide loading screen on error so user can see what failed
     } finally {
       setMessagesLoading(false);
     }
@@ -982,13 +1183,13 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
   useEffect(() => {
     if (debouncedQuery.trim()) {
       setIsSearching(true);
-      // Refresh from DB with search query to use FTS5
-      refreshFromDB(debouncedQuery).finally(() => {
+      // Refresh from DB with search query to use FTS5 - don't show loading screen for search
+      refreshFromDB(debouncedQuery, false).finally(() => {
         setIsSearching(false);
       });
     } else if (debouncedQuery === '') {
-      // Empty query - refresh without search
-      refreshFromDB('');
+      // Empty query - refresh without search - don't show loading screen for clearing search
+      refreshFromDB('', false);
     }
   }, [debouncedQuery, facets.regex, refreshFromDB]);
 
@@ -1678,21 +1879,41 @@ con.close()
     }
   }, [plugin]);
 
-  // Refresh from DB on mount or when DB path changes (not when sources change)
+  // Defer initial load - only load when view is actually opened, not on vault load
+  // This prevents blocking Obsidian startup
+  const [hasInitialized, setHasInitialized] = useState(false);
+  
   useEffect(() => {
-    if (plugin.settings.pythonPipeline?.dbPath) {
-      console.log("🔄 Auto-refreshing from DB on mount or DB path change");
-      console.log("🔄 DB Path:", plugin.settings.pythonPipeline.dbPath);
-      console.log("🔄 Messages state before refresh:", messages.length);
+    // Only load once when view is first opened, not on every mount
+    if (hasInitialized || !plugin.settings.pythonPipeline?.dbPath) {
+      return;
+    }
+    
+    // Small delay to let Obsidian finish loading
+    const timer = setTimeout(() => {
+      console.log("🔄 Loading from DB (deferred)");
+      setHasInitialized(true);
       refreshFromDB().catch(err => {
         console.error("❌ Auto-refresh failed:", err);
         setError(err.message || String(err));
       });
-    } else {
-      console.warn("⚠️ No DB path configured - skipping auto-refresh");
+    }, 500); // 500ms delay to not block startup
+    
+    return () => clearTimeout(timer);
+  }, [hasInitialized, plugin.settings.pythonPipeline?.dbPath, refreshFromDB]);
+  
+  // Reload when DB path changes (but only if already initialized)
+  useEffect(() => {
+    if (hasInitialized && plugin.settings.pythonPipeline?.dbPath) {
+      console.log("🔄 DB path changed, reloading...");
+      refreshFromDB().catch(err => {
+        console.error("❌ Reload failed:", err);
+        setError(err.message || String(err));
+      });
+    } else if (!plugin.settings.pythonPipeline?.dbPath) {
       setError("Database path not configured in settings");
     }
-  }, [refreshFromDB, plugin.settings.pythonPipeline?.dbPath]); // Include refreshFromDB in deps
+  }, [hasInitialized, plugin.settings.pythonPipeline?.dbPath, refreshFromDB]);
 
   // Load database stats on mount
   useEffect(() => {
@@ -1778,8 +1999,132 @@ con.close()
     checkDb();
   }, [plugin.settings.pythonPipeline?.dbPath]); // getSelfCheckContext is hoisted, no need in deps
 
+  const [showCollectionPopout, setShowCollectionPopout] = useState(true);
+  const [collectionPopoutWidth, setCollectionPopoutWidth] = useState(() => {
+    const saved = localStorage.getItem('aihp-collection-width');
+    const parsed = saved ? parseInt(saved, 10) : 400;
+    if (Number.isNaN(parsed)) return 400;
+    return Math.min(Math.max(parsed, 320), 640);
+  });
+  const collectionWidthRef = useRef(collectionPopoutWidth);
+  useEffect(() => {
+    collectionWidthRef.current = collectionPopoutWidth;
+    localStorage.setItem('aihp-collection-width', String(collectionPopoutWidth));
+  }, [collectionPopoutWidth]);
+  const [isResizingCollectionPopout, setIsResizingCollectionPopout] = useState(false);
+  const resizeStartXRef = useRef(0);
+  const resizeStartWidthRef = useRef(collectionPopoutWidth);
+  const collectionThemes = useMemo(() => ([
+    { base: '#f97316', hover: '#fb923c', border: '#f97316', glow: 'rgba(249,115,22,0.45)', emoji: '📦' },
+    { base: '#6366f1', hover: '#8b5cf6', border: '#6366f1', glow: 'rgba(99,102,241,0.45)', emoji: '🗂️' },
+    { base: '#10b981', hover: '#34d399', border: '#059669', glow: 'rgba(16,185,129,0.4)', emoji: '🧰' },
+    { base: '#5b8fb8', hover: '#7ba5c4', border: '#4a7fa0', glow: 'rgba(91,143,184,0.35)', emoji: '🧾' }
+  ]), []);
+  const [collectionThemeIndex] = useState(() => Math.floor(Math.random() * collectionThemes.length));
+  const [collectionButtonHover, setCollectionButtonHover] = useState(false);
+  const [collectionToolbarHover, setCollectionToolbarHover] = useState(false);
+
+  const buildCollectionButtonStyle = (active: boolean, hovered: boolean, variant: 'primary' | 'toolbar') => {
+    const padding = variant === 'primary' ? '6px 16px' : '6px 14px';
+    const fontSize = variant === 'primary' ? '13px' : '12px';
+    const radius = variant === 'primary' ? '10px' : '8px';
+    const shadow = variant === 'primary'
+      ? `inset 0 3px 6px rgba(0,0,0,0.45), 0 12px 24px ${collectionTheme.glow}`
+      : `inset 0 2px 4px rgba(0,0,0,0.35), 0 8px 18px ${collectionTheme.glow}`;
+    return {
+      padding,
+      fontSize,
+      fontWeight: 600,
+      borderRadius: radius,
+      border: `1px solid ${collectionTheme.border}`,
+      background: (hovered || active)
+        ? `linear-gradient(135deg, ${collectionTheme.hover}, ${collectionTheme.base})`
+        : `linear-gradient(135deg, ${collectionTheme.base}, ${collectionTheme.hover})`,
+      boxShadow: shadow,
+      color: '#ffffff',
+      cursor: 'pointer',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '8px',
+      transition: 'all 0.2s ease',
+      transform: hovered || active ? 'translateY(-1px)' : 'translateY(0)',
+      textShadow: '0 1px 2px rgba(0,0,0,0.25)',
+    } as React.CSSProperties;
+  };
+
+  useEffect(() => {
+    if (!isResizingCollectionPopout) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const delta = resizeStartXRef.current - event.clientX;
+      const nextWidth = Math.min(Math.max(resizeStartWidthRef.current + delta, 320), 640);
+      setCollectionPopoutWidth(nextWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingCollectionPopout(false);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingCollectionPopout]);
+
+  const collectionTheme = collectionThemes[collectionThemeIndex % collectionThemes.length];
+  const collectionButtonStyle: React.CSSProperties = buildCollectionButtonStyle(showCollectionPopout, collectionButtonHover, 'primary');
+  const collectionToolbarStyle: React.CSSProperties = buildCollectionButtonStyle(showCollectionPopout, collectionToolbarHover, 'toolbar');
+
+  useEffect(() => {
+    if (!showCollectionPopout) {
+      setIsResizingCollectionPopout(false);
+    }
+  }, [showCollectionPopout]);
+
+  // Handle text selection for collection gripper
+  useEffect(() => {
+    const handleMouseUp = (e: MouseEvent) => {
+      const selection = window.getSelection();
+      if (selection && selection.toString().trim().length > 10) {
+        const text = selection.toString().trim();
+        const range = selection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        setGripperState({
+          show: true,
+          text,
+          position: { x: rect.right + 10, y: rect.top }
+        });
+      } else if (gripperState.show) {
+        // Close gripper if selection cleared
+        setTimeout(() => {
+          if (!window.getSelection()?.toString().trim()) {
+            setGripperState(prev => ({ ...prev, show: false }));
+          }
+        }, 100);
+      }
+    };
+
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => document.removeEventListener('mouseup', handleMouseUp);
+  }, [gripperState.show]);
+
   return (
-    <div ref={rootRef} className="aip-root">
+    <CollectionProvider plugin={plugin}>
+    {showLoadingScreen && (
+      <LoadingScreen
+        steps={loadingSteps}
+        currentStep={loadingSteps.find(s => s.status === 'loading')?.name}
+        overallProgress={loadingSteps.length > 0 
+          ? (loadingSteps.filter(s => s.status === 'complete').length / loadingSteps.length) * 100 
+          : undefined}
+        error={error || undefined}
+        showDevInfo={showDevInfo}
+      />
+    )}
+    <div ref={rootRef} className="aip-root" style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', margin: 0, padding: 0 }}>
       {/* Database Warning Banner */}
       {dbExists === false && (
         <div className="aip-banner aip-banner-warning" style={{padding: '10px', background: 'var(--background-modifier-error)', color: 'var(--text-on-accent)', textAlign: 'center'}}>
@@ -1818,6 +2163,33 @@ con.close()
 
           {/* MIDDLE: Primary controls */}
           <div className="aip-header-center">
+            {/* Dev Tools Toggle */}
+            <button
+              className="aihp-btn"
+              onClick={() => setShowDevInfo(!showDevInfo)}
+              title="Toggle developer info in loading screen (F12 for full DevTools)"
+              style={{
+                fontSize: '11px',
+                padding: '4px 8px',
+                opacity: showDevInfo ? 1 : 0.6
+              }}
+            >
+              {showDevInfo ? '🔧 Dev' : '⚙️'}
+            </button>
+            
+            <button
+              className="aihp-btn"
+              onClick={async () => {
+                const leaf = plugin.app.workspace.openPopoutLeaf();
+                await leaf.setViewState({ type: VIEW_TYPE, active: true });
+                new Notice('Opened in popout window');
+              }}
+              title="Open in popout window (full screen)"
+              style={{ fontSize: '11px', padding: '4px 8px' }}
+            >
+              🔲 Popout
+            </button>
+            
             <button 
               className="aihp-btn" 
               onClick={() => {
@@ -1840,49 +2212,155 @@ con.close()
               {messagesLoading ? 'Loading...' : 'Refresh from DB'}
             </button>
             
+            <button 
+              className="aihp-btn" 
+              onClick={syncFromBackups}
+              disabled={isImporting}
+              title="Sync conversations from backup folders (runs Python import script)"
+            >
+              {isImporting && status === "loading" ? 'Syncing...' : 'Sync from Backups'}
+            </button>
+            
             {plugin.settings.pythonPipeline?.aiAnnotation?.enabled && (
-              <button 
-                className="aihp-btn" 
+            <button 
+              className="aihp-btn" 
                 onClick={annotateWithAI}
-                disabled={isImporting}
+              disabled={isImporting}
                 title="Annotate conversations with AI"
-              >
+            >
                 Annotate with AI
-              </button>
+            </button>
             )}
+            
+            <button 
+              className="aihp-btn" 
+              onClick={exportToMarkdown}
+              disabled={isImporting}
+              title="Export database to Markdown files in vault (runs Python export script)\n\nExport Formats Available:\n• Markdown (.md) - Full conversation export\n• JSON (.json) - Structured data export (via Export Search Results)\n• Graph - Lightweight edge links"
+            >
+              {isImporting && status === "loading" ? 'Exporting...' : 'Export to Markdown'}
+            </button>
 
             {/* Search Bar - In header center with history */}
-            <SearchWithHistory
-              value={searchQuery}
-              onChange={setSearchQuery}
-              onSearch={(query) => {
-                setSearchQuery(query);
-                refreshFromDB(query);
-              }}
-              placeholder={selfCheckResult?.fullTextSearch?.enabled 
-                ? "🔍 Search messages (FTS5 indexed)… (prefix with / for regex)" 
-                : "🔍 Search messages… (prefix with / for regex)"}
-              maxHistory={50}
-              showSuggestions={true}
-            />
-            {selfCheckResult?.fullTextSearch?.enabled && (
-              <span style={{ 
-                fontSize: '11px', 
-                opacity: 0.7, 
-                whiteSpace: 'nowrap',
-                marginLeft: '8px',
-                padding: '4px 8px',
-                background: 'var(--background-modifier-hover)',
-                borderRadius: '4px'
-              }}>
-                FTS5: {selfCheckResult.fullTextSearch.count.toLocaleString()} indexed
-              </span>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+              <SearchWithHistory
+                value={searchQuery}
+                onChange={setSearchQuery}
+                onSearch={(query) => {
+                  setSearchQuery(query);
+                  refreshFromDB(query);
+                }}
+                placeholder={selfCheckResult?.fullTextSearch?.enabled 
+                  ? "🔍 Search messages (FTS5 indexed)… (prefix with / for regex)" 
+                  : "🔍 Search messages… (prefix with / for regex)"}
+                maxHistory={75}
+                showSuggestions={true}
+                accentTheme={collectionTheme}
+                trendingLimit={5}
+                onSaveSearch={(query) => {
+                  // Save search to a new collection
+                  const newCollection = {
+                    id: `search_${Date.now()}`,
+                    label: `Search: ${query.substring(0, 30)}${query.length > 30 ? '...' : ''}`,
+                    content: `# Saved Search\n\n**Query:** ${query}\n\n**Saved:** ${new Date().toLocaleString()}\n\n---\n\n*Use this collection to track results for this search query.*`,
+                    createdAt: Date.now(),
+                    itemCount: 0,
+                    color: undefined,
+                    tags: [],
+                    summary: '',
+                    tableOfContents: '',
+                    enrichedAt: undefined,
+                    enrichModel: undefined,
+                    enrichDuration: undefined,
+                    generatedTitle: undefined,
+                    savedVersions: []
+                  };
+                  setCollections(prev => [...prev, newCollection]);
+                  setActiveCollectionId(newCollection.id);
+                  new Notice(`Search saved to collection: ${newCollection.label}`);
+                }}
+                collections={collections.map(c => ({ id: c.id, label: c.label }))}
+              />
+              {searchQuery && searchQuery.trim() && (
+            <button 
+                  onClick={async () => {
+                    try {
+                      setStatus("Exporting search results...");
+                      const dbPath = plugin.settings.databasePath || plugin.settings.sources[0]?.databasePath;
+                      if (!dbPath) {
+                        throw new Error("No database path configured");
+                      }
+                      const outputPath = await exportSearchResults(
+                        plugin.app,
+                        dbPath,
+                        searchQuery,
+                        { format: "markdown", includeContext: true }
+                      );
+                      setStatus("ready");
+                      new Notice(`✓ Exported to: ${outputPath}`);
+                      // Open the exported file
+                      const file = plugin.app.vault.getAbstractFileByPath(outputPath);
+                      if (file && file instanceof TFile) {
+                        await plugin.app.workspace.openLinkText(outputPath, '', true);
+                      }
+                    } catch (error: any) {
+                      console.error("Export failed:", error);
+                      setError(`Export failed: ${error.message}`);
+                      setStatus("ready");
+                    }
+                  }}
+                  style={{
+                    padding: '6px 12px',
+                    fontSize: '12px',
+                    whiteSpace: 'nowrap',
+                    background: 'var(--interactive-normal)',
+                    border: '1px solid var(--background-modifier-border)',
+                    borderRadius: '4px',
+                    cursor: 'pointer'
+                  }}
+                  title="Export search results to markdown file for AI analysis"
+                >
+                  📥 Export
+            </button>
+              )}
+              {selfCheckResult?.fullTextSearch?.enabled && (
+                <span style={{ 
+                  fontSize: '11px', 
+                  opacity: 0.7, 
+                  whiteSpace: 'nowrap',
+                  padding: '4px 8px',
+                  background: 'var(--background-modifier-hover)',
+                  borderRadius: '4px'
+                }}>
+                  FTS5: {selfCheckResult.fullTextSearch.count.toLocaleString()} indexed
+                </span>
+              )}
+            </div>
 
           </div>
 
           {/* RIGHT: Header actions */}
-          <div className="aip-header-right">
+          <div className="aip-header-right" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              onClick={() => setShowCollectionPopout(prev => !prev)}
+              onMouseEnter={() => setCollectionButtonHover(true)}
+              onMouseLeave={() => setCollectionButtonHover(false)}
+              style={buildCollectionButtonStyle(showCollectionPopout, collectionButtonHover, 'primary')}
+              title={showCollectionPopout ? "Hide collections panel" : "Show collections panel"}
+            >
+              <span>{collectionTheme.emoji}</span>
+              <span>Collections LOCAL</span>
+              <span style={{
+                fontSize: '10px',
+                padding: '2px 6px',
+                borderRadius: '999px',
+                backgroundColor: 'rgba(0, 0, 0, 0.25)',
+                color: '#fff',
+                lineHeight: 1.2
+              }}>
+                {usingDatabase ? 'DB' : 'LOCAL'}
+              </span>
+            </button>
             <button 
               className="aihp-btn"
               onClick={() => plugin.app.workspace.openPopoutLeaf().setViewState({ type: VIEW_TYPE, active: true })}
@@ -1895,7 +2373,7 @@ con.close()
                 checked={useNewView}
                 onChange={(e) => setUseNewView(e.target.checked)}
               />
-              <span>New View</span>
+              <span>New view</span>
             </label>
             <label className="aip-toggle">
               <input
@@ -1905,7 +2383,73 @@ con.close()
               />
               <span>Pin header</span>
             </label>
+            <label className="aip-toggle">
+              <input
+                type="checkbox"
+                checked={isMultiSelectMode}
+                onChange={(e) => {
+                  setIsMultiSelectMode(e.target.checked);
+                  if (!e.target.checked) {
+                    // Clear multi-select when disabling
+                    setSelectedConversations(new Set());
+                    setLastSelectedIndex(null);
+                  }
+                }}
+              />
+              <span>Multi-select</span>
+            </label>
           </div>
+          
+          {/* Bulk Actions Toolbar - shown when multi-select is active */}
+          {isMultiSelectMode && selectedConversations.size > 0 && (
+            <div style={{
+              display: 'flex',
+              gap: '8px',
+              alignItems: 'center',
+              padding: '6px 12px',
+              backgroundColor: 'var(--aihp-bg-modifier)',
+              borderRadius: '6px',
+              marginTop: '8px',
+              border: '1px solid var(--aihp-accent)'
+            }}>
+              <span style={{ fontSize: '12px', fontWeight: '600', marginRight: '8px' }}>
+                {selectedConversations.size} selected
+              </span>
+              <button
+                className="aip-btn"
+                onClick={() => {
+                  // TODO: Implement Add to Project
+                  console.log("Add to Project:", Array.from(selectedConversations));
+                  new Notice(`Add ${selectedConversations.size} conversations to project (coming soon)`);
+                }}
+                title="Add selected conversations to a project"
+              >
+                Add to Project
+              </button>
+              <button
+                className="aip-btn"
+                onClick={() => {
+                  // TODO: Implement New Project from Selection
+                  console.log("New Project from Selection:", Array.from(selectedConversations));
+                  new Notice(`Create project from ${selectedConversations.size} conversations (coming soon)`);
+                }}
+                title="Create a new project from selected conversations"
+              >
+                New Project
+              </button>
+              <button
+                className="aip-btn"
+                onClick={() => {
+                  // TODO: Implement Export Selection
+                  console.log("Export Selection:", Array.from(selectedConversations));
+                  new Notice(`Export ${selectedConversations.size} conversations (coming soon)`);
+                }}
+                title="Export selected conversations"
+              >
+                Export
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Source Manager Row */}
@@ -2008,13 +2552,14 @@ con.close()
       {useNewView ? (
         <TestView messages={messages} />
       ) : (
-      <div className="aip-body" style={{ display: 'grid', gridTemplateRows: '1fr auto', gridTemplateColumns: 'var(--aip-col-left, 320px) 1fr', gap: '10px' }}>
+      <div className="aip-body" style={{ display: 'grid', gridTemplateRows: '1fr', gridTemplateColumns: showCollectionPopout ? `var(--aip-col-left, 320px) 1fr ${collectionPopoutWidth}px` : `var(--aip-col-left, 320px) 1fr 0px`, gap: '0px', overflow: 'hidden', height: '100%', minHeight: 0, flex: 1, padding: 0, marginTop: 0, marginRight: showCollectionPopout ? `${collectionPopoutWidth}px` : '0px' }}>
         {/* Left Pane: Conversation List */}
-        <section className="aip-pane aip-left" style={{
+        <section className="aip-pane aip-conversations-middle" style={{
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
-          position: 'relative'
+          position: 'relative',
+          minHeight: 0
         }}>
           <div className="aip-pane-header">
             <div className="aip-pane-header-top">
@@ -2029,11 +2574,11 @@ con.close()
           
           <LoadingOverlay isLoading={messagesLoading} text="Loading conversations...">
             <ConversationsList
-              conversations={pagedConversations}
-              selectedConversations={selectedConvKey ? new Set([selectedConvKey]) : new Set()}
-              isMultiSelectMode={false}
-              onSelectConversation={handleConvClick}
-              onToggleConversation={handleConvClick}
+                  conversations={pagedConversations}
+              selectedConversations={isMultiSelectMode ? selectedConversations : (selectedConvKey ? new Set([selectedConvKey]) : new Set())}
+              isMultiSelectMode={isMultiSelectMode}
+              onSelectConversation={(convId, index, shiftKey) => handleConvClick(convId, index, shiftKey)}
+              onToggleConversation={(convId, index, shiftKey) => handleConvClick(convId, index, shiftKey)}
               isLoading={messagesLoading}
               treeNodes={hasTree ? treeNodes : []}
               onNavigateToBranch={(convId: string, branchNodeId: string) => {
@@ -2054,6 +2599,65 @@ con.close()
               onTagClick={(tag: string) => {
                 setActiveTagFilter(tag);
                 setActiveViewTab('tagged');
+              }}
+              onAttachmentClick={async (convId: string) => {
+                // Select conversation if not already selected
+                if (convId !== selectedConvKey) {
+                  handleConvClick(convId);
+                }
+                
+                // Load attachments for this conversation
+                setAttachmentsLoading(true);
+                try {
+                  const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+                  const dbPath = resolveVaultPath(plugin.settings.pythonPipeline?.dbPath || '', vaultBasePath);
+                  const path = require("path");
+                  const queryScriptPath = path.join(
+                    plugin.settings.pythonPipeline?.scriptsRoot || vaultBasePath,
+                    'tools',
+                    'query_attachments.py'
+                  );
+                  
+                  const { spawn } = require("child_process");
+                  const proc = spawn(
+                    plugin.settings.pythonPipeline?.pythonExecutable || 'python',
+                    [queryScriptPath, dbPath, convId],
+                    { shell: false, cwd: plugin.settings.pythonPipeline?.scriptsRoot || vaultBasePath }
+                  );
+                  
+                  let stdout = '';
+                  proc.stdout.on('data', (data: Buffer) => {
+                    stdout += data.toString();
+                  });
+                  
+                  await new Promise<void>((resolve, reject) => {
+                    proc.on('close', (code: number) => {
+                      if (code === 0) {
+                        try {
+                          const attachments = JSON.parse(stdout);
+                          setConversationAttachments(attachments);
+                          setAttachmentFilter('has'); // Filter to messages with attachments
+                          setActiveViewTab('conversation');
+                          new Notice(`Found ${attachments.length} attachment(s). Filtering messages...`);
+                        } catch (e: any) {
+                          console.error("Failed to parse attachments:", e);
+                          new Notice("Failed to load attachments");
+                        }
+                        resolve();
+                      } else {
+                        reject(new Error(`Query script exited with code ${code}`));
+                      }
+                    });
+                    proc.on('error', (error: any) => {
+                      reject(error);
+                    });
+                  });
+                } catch (error: any) {
+                  console.error("Failed to query attachments:", error);
+                  new Notice(`Failed to load attachments: ${error.message}`);
+                } finally {
+                  setAttachmentsLoading(false);
+                }
               }}
             />
           </LoadingOverlay>
@@ -2076,71 +2680,210 @@ con.close()
         {/* Center Pane: Selected Conversation Messages + Pagination */}
         <section className="aip-pane aip-center">
           <LoadingOverlay isLoading={isSearching} text="Searching messages...">
-            {/* Tab Navigation */}
+            {/* Consolidated Message Toolbar - Single unified bar */}
             {(activeTagFilter || selectedConvKey) && (
               <div style={{
                 display: 'flex',
+                alignItems: 'center',
                 gap: '8px',
-                padding: '8px 12px',
+                padding: '10px 14px',
                 borderBottom: '1px solid var(--background-modifier-border)',
-                backgroundColor: 'var(--background-secondary)'
+                backgroundColor: 'var(--background-secondary)',
+                flexWrap: 'wrap'
               }}>
-                <button
-                  onClick={() => {
-                    setActiveViewTab('conversation');
-                    if (!selectedConvKey) {
-                      setActiveTagFilter(null);
-                    }
-                  }}
-                  style={{
-                    padding: '6px 12px',
-                    fontSize: '13px',
-                    fontWeight: activeViewTab === 'conversation' ? '600' : '400',
-                    border: 'none',
-                    borderRadius: '4px',
-                    background: activeViewTab === 'conversation' 
-                      ? 'var(--background-modifier-hover)' 
-                      : 'transparent',
-                    color: activeViewTab === 'conversation' 
-                      ? 'var(--text-normal)' 
-                      : 'var(--text-muted)',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s ease'
-                  }}
-                >
-                  Conversation
+                {/* Submenu Area - Conversation Info */}
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginRight: 'auto' }}>
                   {selectedConvKey && (
-                    <span style={{ marginLeft: '6px', opacity: 0.7 }}>
-                      ({selectedConvMessages.length})
-                    </span>
+                    <div style={{ 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      gap: '8px',
+                      marginRight: '12px',
+                      paddingRight: '12px',
+                      borderRight: '1px solid var(--background-modifier-border)'
+                    }}>
+                      <span style={{ fontSize: '13px', fontWeight: '600' }}>
+                        {selectedConvMessages[0]?.title || "(untitled)"}
+                      </span>
+                      <span style={{ fontSize: '11px', opacity: 0.7 }}>
+                        {selectedConvMessages.length} messages
+                      </span>
+                    </div>
                   )}
-                </button>
-                {activeTagFilter && (
                   <button
-                    onClick={() => setActiveViewTab('tagged')}
+                    onClick={() => {
+                      setActiveViewTab('conversation');
+                      if (!selectedConvKey) {
+                        setActiveTagFilter(null);
+                      }
+                    }}
                     style={{
                       padding: '6px 12px',
                       fontSize: '13px',
-                      fontWeight: activeViewTab === 'tagged' ? '600' : '400',
+                      fontWeight: activeViewTab === 'conversation' ? '600' : '400',
                       border: 'none',
                       borderRadius: '4px',
-                      background: activeViewTab === 'tagged' 
+                      background: activeViewTab === 'conversation' 
                         ? 'var(--background-modifier-hover)' 
                         : 'transparent',
-                      color: activeViewTab === 'tagged' 
+                      color: activeViewTab === 'conversation' 
                         ? 'var(--text-normal)' 
                         : 'var(--text-muted)',
                       cursor: 'pointer',
-                      transition: 'all 0.2s ease',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px'
+                      transition: 'all 0.2s ease'
                     }}
                   >
-                    <span>Tagged: {activeTagFilter.replace(/^batch:/, '')}</span>
-                    <span style={{ opacity: 0.7 }}>
-                      ({taggedMessages.length} messages, {taggedConversations.length} conversations)
-                    </span>
+                    Messages
+                  </button>
+                  
+                  {/* Attachments Tab */}
+                  {selectedConvKey && conversationAttachments.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setActiveViewTab('attachments');
+                        setShowAttachmentGallery(true);
+                      }}
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '13px',
+                        fontWeight: activeViewTab === 'attachments' ? '600' : '400',
+                        border: 'none',
+                        borderRadius: '4px',
+                        background: activeViewTab === 'attachments' 
+                          ? 'var(--background-modifier-hover)' 
+                          : 'transparent',
+                        color: activeViewTab === 'attachments' 
+                          ? 'var(--text-normal)' 
+                          : 'var(--text-muted)',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      📎 Attachments ({conversationAttachments.length})
+                    </button>
+                  )}
+                  
+                  {/* Attachment Filter Badge */}
+                  {attachmentFilter !== 'all' && (
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      padding: '4px 8px',
+                      backgroundColor: 'var(--aihp-accent)',
+                      color: 'var(--text-on-accent)',
+                      borderRadius: '4px',
+                      fontSize: '11px'
+                    }}>
+                      <span>
+                        {attachmentFilter === 'has' && '📎 Has attachments'}
+                        {attachmentFilter === 'missing' && '⚠️ Missing attachments'}
+                        {attachmentFilter === 'remote' && '🌐 Remote attachments'}
+                      </span>
+                      <button
+                        onClick={() => {
+                          setAttachmentFilter('all');
+                          setConversationAttachments([]);
+                        }}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: 'inherit',
+                          cursor: 'pointer',
+                          padding: '0 4px',
+                          fontSize: '12px'
+                        }}
+                        title="Clear attachment filter"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
+                  
+                  {/* Message Selection Mode Toggle */}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '12px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={isMessageSelectMode}
+                      onChange={(e) => {
+                        setIsMessageSelectMode(e.target.checked);
+                        if (!e.target.checked) {
+                          setSelectedMessages(new Set());
+                          setSelectedTextSelections(new Map());
+                        }
+                      }}
+                    />
+                    <span style={{ fontSize: '12px' }}>Select Messages</span>
+                  </label>
+                  
+                  {/* Add Selected Messages to Collection */}
+                  {isMessageSelectMode && selectedMessages.size > 0 && collections.length > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '12px' }}>
+                      <select
+                        onChange={(e) => {
+                          const collectionId = e.target.value;
+                          if (collectionId) {
+                            // Get selected messages text
+                            const selectedTexts = Array.from(selectedMessages).map(msgId => {
+                              const msg = selectedConvMessages.find(m => m.id === msgId);
+                              if (msg) {
+                                return `[${msg.role.toUpperCase()}] ${msg.text}`;
+                              }
+                              return null;
+                            }).filter(Boolean).join('\n\n---\n\n');
+                            
+                            if (selectedTexts) {
+                              addToCollection(collectionId, selectedTexts, true);
+                              new Notice(`Added ${selectedMessages.size} message(s) to collection`);
+                              setSelectedMessages(new Set());
+                            }
+                            e.target.value = '';
+                          }
+                        }}
+                        style={{
+                          padding: '4px 8px',
+                          fontSize: '11px',
+                          border: '1px solid var(--background-modifier-border)',
+                          borderRadius: '4px',
+                          background: 'var(--background-secondary)'
+                        }}
+                        defaultValue=""
+                      >
+                        <option value="">Add to Collection...</option>
+                        {collections.map(coll => (
+                          <option key={coll.id} value={coll.id}>{coll.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                {activeTagFilter && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <button
+                      onClick={() => setActiveViewTab('tagged')}
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '13px',
+                        fontWeight: activeViewTab === 'tagged' ? '600' : '400',
+                        border: 'none',
+                        borderRadius: '4px',
+                        background: activeViewTab === 'tagged' 
+                          ? 'var(--background-modifier-hover)' 
+                          : 'transparent',
+                        color: activeViewTab === 'tagged' 
+                          ? 'var(--text-normal)' 
+                          : 'var(--text-muted)',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px'
+                      }}
+                    >
+                      <span>Tagged: {activeTagFilter.replace(/^batch:/, '')}</span>
+                      <span style={{ opacity: 0.7 }}>
+                        ({taggedMessages.length} messages, {taggedConversations.length} conversations)
+                      </span>
+                    </button>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -2148,7 +2891,6 @@ con.close()
                         setActiveViewTab('conversation');
                       }}
                       style={{
-                        marginLeft: '4px',
                         padding: '2px 6px',
                         fontSize: '11px',
                         border: 'none',
@@ -2162,8 +2904,9 @@ con.close()
                     >
                       ×
                     </button>
-                  </button>
+                  </div>
                 )}
+                </div>
               </div>
             )}
 
@@ -2239,96 +2982,6 @@ con.close()
                       );
                     })}
                   </div>
-                )}
-              </div>
-            )}
-            {/* Tab Navigation */}
-            {(activeTagFilter || selectedConvKey) && (
-              <div style={{
-                display: 'flex',
-                gap: '8px',
-                padding: '8px 12px',
-                borderBottom: '1px solid var(--background-modifier-border)',
-                backgroundColor: 'var(--background-secondary)'
-              }}>
-                <button
-                  onClick={() => {
-                    setActiveViewTab('conversation');
-                    if (!selectedConvKey) {
-                      setActiveTagFilter(null);
-                    }
-                  }}
-                  style={{
-                    padding: '6px 12px',
-                    fontSize: '13px',
-                    fontWeight: activeViewTab === 'conversation' ? '600' : '400',
-                    border: 'none',
-                    borderRadius: '4px',
-                    background: activeViewTab === 'conversation' 
-                      ? 'var(--background-modifier-hover)' 
-                      : 'transparent',
-                    color: activeViewTab === 'conversation' 
-                      ? 'var(--text-normal)' 
-                      : 'var(--text-muted)',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s ease'
-                  }}
-                >
-                  Conversation
-                  {selectedConvKey && (
-                    <span style={{ marginLeft: '6px', opacity: 0.7 }}>
-                      ({selectedConvMessages.length})
-                    </span>
-                  )}
-                </button>
-                {activeTagFilter && (
-                  <button
-                    onClick={() => setActiveViewTab('tagged')}
-                    style={{
-                      padding: '6px 12px',
-                      fontSize: '13px',
-                      fontWeight: activeViewTab === 'tagged' ? '600' : '400',
-                      border: 'none',
-                      borderRadius: '4px',
-                      background: activeViewTab === 'tagged' 
-                        ? 'var(--background-modifier-hover)' 
-                        : 'transparent',
-                      color: activeViewTab === 'tagged' 
-                        ? 'var(--text-normal)' 
-                        : 'var(--text-muted)',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s ease',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px'
-                    }}
-                  >
-                    <span>Tagged: {activeTagFilter.replace(/^batch:/, '')}</span>
-                    <span style={{ opacity: 0.7 }}>
-                      ({taggedMessages.length} messages, {taggedConversations.length} conversations)
-                    </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveTagFilter(null);
-                        setActiveViewTab('conversation');
-                      }}
-                      style={{
-                        marginLeft: '4px',
-                        padding: '2px 6px',
-                        fontSize: '11px',
-                        border: 'none',
-                        borderRadius: '3px',
-                        background: 'var(--background-modifier-border)',
-                        color: 'var(--text-muted)',
-                        cursor: 'pointer',
-                        opacity: 0.7
-                      }}
-                      title="Clear tag filter"
-                    >
-                      ×
-                    </button>
-                  </button>
                 )}
               </div>
             )}
@@ -2423,63 +3076,8 @@ con.close()
             )}
 
             {activeViewTab === 'conversation' && selectedConvKey && (
-            <div className="aihp-message-detail">
-              <div className="aihp-detail-header">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
-                  <div style={{ flex: 1 }}>
-                    <h3>
-                      {selectedConvMessages[0]?.title || "(untitled)"}
-                    </h3>
-                    <div className="aihp-detail-meta">
-                      {selectedConvMessages.length > 0 && selectedConvMessages[0].createdAt && selectedConvMessages[0].createdAt > 946684800
-                        ? new Date(selectedConvMessages[0].createdAt * 1000).toLocaleString()
-                        : 'Date unavailable'}
-                      {selectedBranchPath.length > 0 && (
-                        <span style={{ marginLeft: '12px', fontSize: '11px', opacity: 0.7 }}>
-                          • Branch view active
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {hasTree && selectedConvKey && (() => {
-                    const branchPoints = getBranchPointsForConversation(selectedConvKey);
-                    const convNodes = getTreeNodesForConversation(selectedConvKey);
-                    const maxDepth = convNodes.length > 0 
-                      ? Math.max(...convNodes.map((n: any) => n.depth || 0))
-                      : 0;
-                    
-                    return branchPoints.length > 0 ? (
-                      <div style={{ 
-                        display: 'flex', 
-                        flexDirection: 'column', 
-                        gap: '4px',
-                        fontSize: '11px',
-                        opacity: 0.8,
-                        textAlign: 'right'
-                      }}>
-                        <div>🌳 {branchPoints.length} branch{branchPoints.length !== 1 ? 'es' : ''}</div>
-                        <div>📊 Depth: {maxDepth}</div>
-                        {selectedBranchPath.length > 0 && (
-                          <button
-                            onClick={() => setSelectedBranchPath([])}
-                            style={{
-                              padding: '4px 8px',
-                              fontSize: '10px',
-                              border: '1px solid var(--aihp-bg-modifier)',
-                              borderRadius: '4px',
-                              background: 'var(--aihp-bg-secondary)',
-                              cursor: 'pointer'
-                            }}
-                          >
-                            Show all branches
-                          </button>
-                        )}
-                      </div>
-                    ) : null;
-                  })()}
-                </div>
-                
-                {/* Branch navigation controls */}
+            <div className="aihp-message-detail" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'auto' }}>
+              {/* Branch navigation controls - only show if tree structure exists */}
                 {hasTree && selectedConvKey && (() => {
                   const branchPoints = getBranchPointsForConversation(selectedConvKey);
                   if (branchPoints.length === 0) return null;
@@ -2522,8 +3120,7 @@ con.close()
                     </div>
                   );
                 })()}
-              </div>
-
+              
               {pagedConvTurns.map(turn => (
                 <div key={turn.id} className="aihp-turn">
                   <div className="aihp-turn-header">
@@ -2536,8 +3133,107 @@ con.close()
                     </span>
                   </div>
                   <div className="aihp-turn-messages">
-                    {turn.items.map(msg => (
-                      <div key={msg.id} className="aihp-message" onClick={() => setSelectedMessage(msg as any)}>
+                    {turn.items.map(msg => {
+                      const isSelected = selectedMessages.has(msg.id);
+                      return (
+                        <div 
+                          key={msg.id} 
+                          className="aihp-message" 
+                          data-role={msg.role}
+                          onMouseDown={(e) => {
+                            // If clicking on checkbox area, don't handle
+                            if ((e.target as HTMLElement).tagName === 'INPUT' || 
+                                (e.target as HTMLElement).closest('input[type="checkbox"]')) {
+                              return;
+                            }
+                            // If user is selecting text, don't interfere
+                            const selection = window.getSelection();
+                            if (selection && selection.toString().length > 0) {
+                              // User is selecting text, don't interfere
+                              return;
+                            }
+                            // Only handle click if not in text selection mode
+                            // Check if the click is on text content (not on interactive elements)
+                            const target = e.target as HTMLElement;
+                            if (target.tagName === 'CODE' || target.tagName === 'PRE' || 
+                                target.closest('code') || target.closest('pre') ||
+                                target.closest('.aihp-message-text') || target.closest('.aihp-message-content')) {
+                              // User clicked on text content, allow text selection
+                              return;
+                            }
+                            if (!isMessageSelectMode && e.detail === 1) {
+                              // Single click - select message (only if not clicking on text)
+                              setSelectedMessage(msg as any);
+                            }
+                          }}
+                          onMouseUp={(e) => {
+                            // Handle text selection - only if not in select mode
+                            if (!isMessageSelectMode) {
+                              setTimeout(() => {
+                                const selection = window.getSelection();
+                                if (selection && selection.toString().trim().length > 0) {
+                                  const selectedText = selection.toString();
+                                  setSelectedTextSelections(prev => {
+                                    const next = new Map(prev);
+                                    next.set(msg.id, selectedText);
+                                    return next;
+                                  });
+                                  // Copy to clipboard automatically
+                                  navigator.clipboard.writeText(selectedText).catch(console.error);
+                                }
+                              }, 10);
+                            }
+                          }}
+                          style={{
+                            padding: '12px 16px',
+                            marginBottom: '12px',
+                            borderRadius: '8px',
+                            lineHeight: '1.6',
+                            position: 'relative',
+                            border: isSelected ? '2px solid var(--aihp-accent)' : undefined,
+                            backgroundColor: isSelected ? 'rgba(139, 208, 255, 0.1)' : undefined,
+                            cursor: 'text',
+                            userSelect: 'text',
+                            WebkitUserSelect: 'text',
+                            MozUserSelect: 'text',
+                            msUserSelect: 'text'
+                          }}
+                        >
+                          {isMessageSelectMode && (
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={(e) => {
+                                e.stopPropagation();
+                                setSelectedMessages(prev => {
+                                  const next = new Set(prev);
+                                  if (next.has(msg.id)) {
+                                    next.delete(msg.id);
+                                  } else {
+                                    next.add(msg.id);
+                                  }
+                                  return next;
+                                });
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                              style={{
+                                position: 'absolute',
+                                top: '8px',
+                                left: '8px',
+                                zIndex: 10,
+                                cursor: 'pointer',
+                                width: '18px',
+                                height: '18px'
+                              }}
+                            />
+                          )}
+                          <div style={{
+                            marginLeft: isMessageSelectMode ? '28px' : '0',
+                            userSelect: 'text',
+                            WebkitUserSelect: 'text',
+                            MozUserSelect: 'text',
+                            msUserSelect: 'text'
+                          }}>
                         <MessageContent
                           text={msg.text}
                           toolName={undefined}
@@ -2545,15 +3241,17 @@ con.close()
                           query={debouncedQuery}
                           useRegex={facets.regex}
                           highlightText={highlightText}
-                          app={plugin.app}
+                              app={plugin.app}
                         />
+                          </div>
                         <div className="aihp-message-meta">
                           {msg.ts && msg.ts > 946684800 
                             ? new Date(msg.ts * 1000).toLocaleString()
                             : 'Date unavailable'}
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -2571,8 +3269,78 @@ con.close()
               />
             </div>
           )}
+
+            {/* Attachments Gallery View */}
+            {activeViewTab === 'attachments' && selectedConvKey && conversationAttachments.length > 0 && (
+              <div className="aihp-message-detail" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+                <AttachmentGallery
+                  attachments={conversationAttachments}
+                  vaultBasePath={(plugin.app.vault.adapter as any).basePath || ''}
+                  onClose={() => {
+                    setActiveViewTab('conversation');
+                    setShowAttachmentGallery(false);
+                  }}
+                />
+              </div>
+            )}
+
+            {/* Attachment Viewer Modal */}
+            {selectedAttachment && (
+              <AttachmentViewer
+                attachment={selectedAttachment}
+                onClose={() => setSelectedAttachment(null)}
+                vaultBasePath={(plugin.app.vault.adapter as any).basePath || ''}
+              />
+            )}
           </LoadingOverlay>
         </section>
+
+        {/* Collections Panel - RIGHT SIDE (toggleable, full height, extends to top) */}
+        {showCollectionPopout && (
+        <aside 
+          className="aip-pane aip-collections-right" 
+          style={{ 
+            width: `${collectionPopoutWidth}px`, 
+            borderLeft: '1px solid var(--background-modifier-border)',
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100vh',
+            minHeight: '100vh',
+            maxHeight: '100vh',
+            overflow: 'hidden',
+            position: 'fixed',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            backgroundColor: 'var(--background-primary)',
+            zIndex: 100,
+            marginTop: 0,
+            paddingTop: 0
+          }}
+        >
+          <CollectionPanel onCollectionUpdate={setCollections} plugin={plugin} />
+          <div 
+            className="aip-resize-handle" 
+            onMouseDown={(e) => {
+              setIsResizingCollectionPopout(true);
+              resizeStartXRef.current = e.clientX;
+              resizeStartWidthRef.current = collectionPopoutWidth;
+              e.preventDefault();
+            }}
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: '4px',
+              cursor: 'col-resize',
+              backgroundColor: 'transparent',
+              zIndex: 10,
+              pointerEvents: 'auto'
+            }}
+          />
+        </aside>
+        )}
 
         {/* Right Pane: Filters & Stats (temporarily removed for more space) */}
         {false && (
@@ -2620,7 +3388,7 @@ con.close()
                       : 0;
                     
                     return (
-                      <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--aihp-bg-modifier)' }}>
+                    <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--aihp-bg-modifier)' }}>
                         <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '4px' }}>Tree Structure:</div>
                         <div style={{ fontSize: '11px' }}>Nodes: {convNodes.length.toLocaleString()}</div>
                         <div style={{ fontSize: '11px' }}>Roots: {rootNodes.length.toLocaleString()}</div>
@@ -2630,8 +3398,8 @@ con.close()
                         {selectedBranchPath.length > 0 && (
                           <div style={{ fontSize: '10px', opacity: 0.7, marginTop: '4px' }}>
                             Branch view: {selectedBranchPath.length} nodes
-                          </div>
-                        )}
+                    </div>
+                  )}
                       </div>
                     );
                   })()}
@@ -2809,9 +3577,24 @@ con.close()
               }}
             />
           </div>
-        </div>
+      </div>
       )}
     </div>
+      
+      {/* Collection Gripper - Floating button for text selection */}
+      {gripperState.show && (
+        <CollectionGripper
+          text={gripperState.text}
+          collections={collections.map(c => ({ id: c.id, label: c.label, color: c.color }))}
+          onAddToCollection={(collectionId, text) => {
+            addToCollection(collectionId, text, true);
+            setGripperState({ show: false, text: '', position: { x: 0, y: 0 } });
+          }}
+          position={gripperState.position}
+          onClose={() => setGripperState({ show: false, text: '', position: { x: 0, y: 0 } })}
+        />
+      )}
+    </CollectionProvider>
   );
 }
 

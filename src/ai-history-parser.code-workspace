@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../../../.."
+		},
+		{
+			"path": "../../../../../../Users/jimjr/.ollama"
+		}
+	],
+	"settings": {
+		"powershell.cwd": "ai-history-parser",
+		"workbench.colorTheme": "Shades of Purple (Super Dark)",
+		"workbench.iconTheme": "vscode-great-icons",
+		"cursor.cmdk.useThemedDiffBackground2": true,
+		"window.autoDetectColorScheme": false
+	}
+}

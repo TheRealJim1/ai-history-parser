@@ -12,6 +12,10 @@ type Props = {
   onPageSizeChange: (s:number)=>void;
   collapseTools?: boolean;
   showSystem?: boolean;
+  isMessageSelectMode?: boolean;
+  selectedMessages?: Set<string>;
+  onToggleMessage?: (messageId: string) => void;
+  onSelectMessageText?: (messageId: string, text: string) => void;
 };
 
 const RolePill: React.FC<{role: Msg['role']}> = ({role}) => (
@@ -29,7 +33,19 @@ const VendorBadge: React.FC<{v?: string}> = ({v}) => {
 };
 
 export default function MessageTurns(props: Props){
-  const { messages, pageSize, page, onPageChange, onPageSizeChange, collapseTools, showSystem } = props;
+  const { 
+    messages, 
+    pageSize, 
+    page, 
+    onPageChange, 
+    onPageSizeChange, 
+    collapseTools, 
+    showSystem,
+    isMessageSelectMode = false,
+    selectedMessages = new Set(),
+    onToggleMessage,
+    onSelectMessageText
+  } = props;
 
   // filter roles
   const filtered = useMemo(()=> messages.filter(m =>
@@ -102,9 +118,63 @@ export default function MessageTurns(props: Props){
                     </div>
                   </div>
                   <div className="space-y-3">
-                    {t.items.map(m => (
-                      <div key={m.id} className="whitespace-pre-wrap break-words leading-6">{renderToolSafe(m)}</div>
-                    ))}
+                    {t.items.map(m => {
+                      const isSelected = selectedMessages.has(m.id);
+                      return (
+                        <div 
+                          key={m.id} 
+                          className="whitespace-pre-wrap break-words leading-6 aihp-message"
+                          data-role={m.role}
+                          style={{
+                            padding: '12px 16px',
+                            marginBottom: '12px',
+                            borderRadius: '8px',
+                            lineHeight: '1.6',
+                            position: 'relative',
+                            border: isSelected ? '2px solid var(--aihp-accent)' : undefined,
+                            backgroundColor: isSelected ? 'rgba(139, 208, 255, 0.1)' : undefined
+                          }}
+                          onMouseUp={(e) => {
+                            // Handle text selection
+                            const selection = window.getSelection();
+                            if (selection && selection.toString().trim().length > 0) {
+                              const selectedText = selection.toString();
+                              onSelectMessageText?.(m.id, selectedText);
+                            }
+                          }}
+                        >
+                          {isMessageSelectMode && (
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={(e) => {
+                                e.stopPropagation();
+                                onToggleMessage?.(m.id);
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                              style={{
+                                position: 'absolute',
+                                top: '8px',
+                                left: '8px',
+                                zIndex: 10,
+                                cursor: 'pointer',
+                                width: '18px',
+                                height: '18px'
+                              }}
+                            />
+                          )}
+                          <div style={{
+                            marginLeft: isMessageSelectMode ? '28px' : '0',
+                            userSelect: 'text',
+                            WebkitUserSelect: 'text',
+                            MozUserSelect: 'text',
+                            msUserSelect: 'text'
+                          }}>
+                            {renderToolSafe(m)}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </div>

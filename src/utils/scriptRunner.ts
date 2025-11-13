@@ -107,6 +107,68 @@ export async function executePythonScript(
   });
 }
 
+export interface PythonRunResult {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+}
+
+export async function runPythonScript(
+  cmd: string[],
+  options: { cwd?: string } = {}
+): Promise<PythonRunResult> {
+  return new Promise((resolve, reject) => {
+    const [executable, ...args] = cmd;
+
+    let cwd = options.cwd;
+    if (!cwd) {
+      try {
+        if (typeof process !== 'undefined' && process && typeof process.cwd === 'function') {
+          cwd = process.cwd();
+        }
+      } catch {
+        cwd = undefined;
+      }
+    }
+
+    const proc = spawn(executable, args, { shell: false, cwd });
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout?.on('data', (data) => {
+      stdout += data.toString();
+    });
+    proc.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    proc.on('error', (error) => {
+      reject(error);
+    });
+
+    proc.on('close', (code) => {
+      resolve({ stdout, stderr, code });
+    });
+  });
+}
+
+export async function runPythonJson<T>(cmd: string[]): Promise<T> {
+  const result = await runPythonScript(cmd);
+  if (result.code !== 0) {
+    throw new Error(result.stderr || result.stdout || `Process exited with code ${result.code}`);
+  }
+  const text = result.stdout.trim();
+  if (!text) {
+    throw new Error('No JSON output received');
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    console.error('Failed to parse JSON output:', text);
+    throw error;
+  }
+}
+
 export function buildSyncCommand(
   pythonExecutable: string,
   scriptsRoot: string,

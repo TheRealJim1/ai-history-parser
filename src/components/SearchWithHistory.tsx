@@ -1,5 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 
+interface AccentTheme {
+  base: string;
+  hover: string;
+  border: string;
+  glow: string;
+}
+
 interface SearchWithHistoryProps {
   value: string;
   onChange: (value: string) => void;
@@ -8,6 +15,10 @@ interface SearchWithHistoryProps {
   disabled?: boolean;
   maxHistory?: number;
   showSuggestions?: boolean;
+  accentTheme?: AccentTheme;
+  trendingLimit?: number;
+  onSaveSearch?: (query: string) => void; // Callback to save search to collection/project
+  collections?: Array<{ id: string; label: string }>; // Available collections for saving
 }
 
 interface SearchHistoryItem {
@@ -23,7 +34,11 @@ export const SearchWithHistory: React.FC<SearchWithHistoryProps> = ({
   placeholder = "Search...",
   disabled = false,
   maxHistory = 50,
-  showSuggestions = true
+  showSuggestions = true,
+  accentTheme,
+  trendingLimit = 4,
+  onSaveSearch,
+  collections = []
 }) => {
   const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]);
   const [showSuggestionsDropdown, setShowSuggestionsDropdown] = useState(false);
@@ -115,6 +130,46 @@ export const SearchWithHistory: React.FC<SearchWithHistoryProps> = ({
     // Combine: exact matches first, then partial matches
     return [...matched, ...partial].slice(0, 10);
   }, [value, searchHistory, showSuggestions]);
+
+  const trendingSuggestions = useMemo(() => {
+    const sorted = [...searchHistory];
+    sorted.sort((a, b) => {
+      if (a.count !== b.count) return b.count - a.count;
+      return b.timestamp - a.timestamp;
+    });
+    return sorted.slice(0, trendingLimit);
+  }, [searchHistory, trendingLimit]);
+
+  const accentWrapperStyle = accentTheme
+    ? {
+        position: 'relative' as const,
+        display: 'flex',
+        alignItems: 'center',
+        gap: '10px',
+        padding: '10px 16px',
+        borderRadius: '14px',
+        border: `1px solid ${accentTheme.border}`,
+        background: `linear-gradient(135deg, ${accentTheme.base}, ${accentTheme.hover})`,
+        boxShadow: `inset 0 2px 4px rgba(0,0,0,0.45), 0 15px 28px ${accentTheme.glow}`,
+      }
+    : {
+        position: 'relative' as const,
+        display: 'flex',
+        alignItems: 'center',
+      };
+
+  const inputStyle: React.CSSProperties = {
+    flex: 1,
+    minWidth: '320px',
+    maxWidth: '520px',
+    fontSize: '14px',
+    padding: '8px 4px',
+    border: 'none',
+    outline: 'none',
+    background: accentTheme ? 'transparent' : 'var(--background-primary)',
+    color: '#ffffff',
+    fontWeight: 700,
+  };
 
   // Handle input change
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -211,63 +266,127 @@ export const SearchWithHistory: React.FC<SearchWithHistoryProps> = ({
     });
   };
 
+  const dropdownTop = accentTheme
+    ? trendingSuggestions.length > 0 ? '108px' : '72px'
+    : trendingSuggestions.length > 0 ? '80px' : '48px';
+
   return (
     <div style={{ position: 'relative', width: '100%' }}>
-      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-        <input
-          ref={inputRef}
-          type="text"
-          className="aihp-input search"
-          placeholder={placeholder}
-          value={value}
-          onChange={handleChange}
-          onFocus={handleFocus}
-          onBlur={handleBlur}
-          onKeyDown={handleKeyDown}
-          disabled={disabled}
-          style={{
-            flex: 1,
-            minWidth: '260px',
-            maxWidth: '380px',
-            fontSize: '13px',
-            padding: '4px 10px',
-            marginLeft: '8px',
-            border: '1px solid var(--background-modifier-border)',
-            borderRadius: '4px',
-            background: 'var(--background-primary)',
-            paddingRight: value.trim() || searchHistory.length > 0 ? '28px' : '10px'
-          }}
-        />
-        {(value.trim() || searchHistory.length > 0) && (
-          <button
-            type="button"
-            onClick={clearHistory}
-            style={{
-              position: 'absolute',
-              right: '8px',
-              top: '50%',
-              transform: 'translateY(-50%)',
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-muted)',
-              cursor: 'pointer',
-              padding: '2px 4px',
-              fontSize: '12px',
-              opacity: 0.6,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center'
-            }}
-            title="Clear search history"
-            onMouseEnter={(e) => {
-              e.currentTarget.style.opacity = '1';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.opacity = '0.6';
-            }}
-          >
-            🗑️
-          </button>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <div style={accentWrapperStyle}>
+          <span style={{ fontSize: '18px', opacity: accentTheme ? 0.85 : 0.65 }}>🔍</span>
+          <input
+            ref={inputRef}
+            type="text"
+            className="aihp-input search"
+            placeholder={placeholder}
+            value={value}
+            onChange={handleChange}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
+            onKeyDown={handleKeyDown}
+            disabled={disabled}
+            style={inputStyle}
+          />
+          <style>{`
+            input.search::placeholder {
+              color: rgba(255, 255, 255, 0.6) !important;
+              font-weight: 700 !important;
+            }
+          `}</style>
+          {onSaveSearch && value.trim() && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSaveSearch(value.trim());
+              }}
+              style={{
+                background: accentTheme ? 'rgba(0,0,0,0.25)' : 'transparent',
+                border: 'none',
+                color: '#ffffff',
+                fontSize: '14px',
+                padding: '4px 8px',
+                cursor: 'pointer',
+                borderRadius: '4px',
+                fontWeight: '700'
+              }}
+              title="Save search to collection/project"
+            >
+              💾
+            </button>
+          )}
+          {(value.trim() || searchHistory.length > 0) && (
+            <button
+              type="button"
+              onClick={clearHistory}
+              style={{
+                background: accentTheme ? 'rgba(0,0,0,0.25)' : 'transparent',
+                border: 'none',
+                color: accentTheme ? '#ffffffcc' : 'var(--text-muted)',
+                cursor: 'pointer',
+                padding: '4px 6px',
+                fontSize: '12px',
+                borderRadius: '999px',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+              title="Clear search history"
+              onMouseEnter={(e) => {
+                e.currentTarget.style.opacity = '1';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.opacity = '0.8';
+              }}
+            >
+              🗑️
+            </button>
+          )}
+        </div>
+
+        {trendingSuggestions.length > 0 && (
+          <div style={{ 
+            display: 'flex', 
+            flexWrap: 'wrap', 
+            gap: '6px', 
+            paddingLeft: accentTheme ? '4px' : '12px',
+            paddingTop: '4px'
+          }}>
+            <span style={{ 
+              fontSize: '10px', 
+              color: accentTheme ? 'rgba(255,255,255,0.7)' : 'var(--text-muted)',
+              fontWeight: 700,
+              marginRight: '4px',
+              alignSelf: 'center'
+            }}>Recent:</span>
+            {trendingSuggestions.map(item => (
+              <button
+                key={`trend-${item.query}`}
+                type="button"
+                onClick={() => selectSuggestion(item.query)}
+                style={{
+                  fontSize: '11px',
+                  padding: '4px 8px',
+                  borderRadius: '999px',
+                  border: accentTheme ? 'none' : '1px solid var(--background-modifier-border)',
+                  background: accentTheme ? 'rgba(0,0,0,0.25)' : 'var(--background-secondary)',
+                  color: accentTheme ? '#ffffff' : '#ffffff',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+                title={`Used ${item.count} time${item.count !== 1 ? 's' : ''}`}
+              >
+                <span>⭐</span>
+                <span>{item.query}</span>
+                {item.count > 1 && (
+                  <span style={{ fontSize: '9px', opacity: 0.8 }}>({item.count})</span>
+                )}
+              </button>
+            ))}
+          </div>
         )}
       </div>
 
@@ -277,15 +396,15 @@ export const SearchWithHistory: React.FC<SearchWithHistoryProps> = ({
           ref={dropdownRef}
           style={{
             position: 'absolute',
-            top: '100%',
-            left: '12px',
-            right: '12px',
+            top: dropdownTop,
+            left: accentTheme ? '8px' : '12px',
+            right: accentTheme ? '8px' : '12px',
             marginTop: '4px',
             backgroundColor: 'var(--background-primary)',
             border: '1px solid var(--background-modifier-border)',
-            borderRadius: '4px',
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
-            maxHeight: '300px',
+            borderRadius: '8px',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
+            maxHeight: '320px',
             overflowY: 'auto',
             zIndex: 1000,
             fontSize: '13px'

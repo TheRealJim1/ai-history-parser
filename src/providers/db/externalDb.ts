@@ -1,6 +1,6 @@
 // External DB reader - reads from Python pipeline SQLite database
 import type { App } from 'obsidian';
-import { resolveVaultPath } from '../settings';
+import { resolveVaultPath } from '../../settings';
 
 export interface Conversation {
   id: string;

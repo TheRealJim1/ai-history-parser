@@ -1,7 +1,7 @@
 
 import initSqlJs from 'sql.js';
 import type { App, TFile } from 'obsidian';
-import { fnv1a64, normText } from '../lib/hash';
+import { fnv1a64, normText } from '../../lib/hash';
 
 export type SqlDB = any;
 const DB_PATH_DEFAULT = 'ahp-db/aihp.sqlite';

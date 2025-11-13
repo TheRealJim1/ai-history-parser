@@ -1,7 +1,7 @@
 
 import type { App } from 'obsidian';
 import { listJsonFiles, indexConversations } from '../search';
-import { AHPDB } from '../db/sqlite';
+import { AHPDB } from '../providers/db/sqlite';
 import { sha256Hex } from '../lib/hash';
 import type { Conv } from '../types';
 

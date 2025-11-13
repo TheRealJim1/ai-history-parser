@@ -8,7 +8,7 @@
  * - Context consolidation
  */
 
-import { AHPDB } from '../db/sqlite';
+import { AHPDB } from '../providers/db/sqlite';
 import { getEmbeddingsService } from '../lib/embeddings';
 import { generateDocumentEmbeddings } from '../lib/vectorSearch';
 import type { App } from 'obsidian';

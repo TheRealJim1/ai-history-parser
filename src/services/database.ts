@@ -1,5 +1,5 @@
 import { QueryClient } from '@tanstack/react-query';
-import { AHPDB } from '../db/sqlite';
+import { AHPDB } from '../providers/db/sqlite';
 import type { App } from 'obsidian';
 import type { FlatMessage, Source } from '../types';
 

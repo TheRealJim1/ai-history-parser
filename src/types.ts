@@ -72,6 +72,21 @@ export interface PythonPipelineSettings {
   
   // Test Mode
   testMode?: TestModeSettings;
+  
+  // LM Studio / Ollama Configuration
+  lmStudio?: {
+    url: string;                // LM Studio URL - Default: http://localhost:1234
+    ollamaUrl?: string;          // Ollama URL - Default: http://localhost:11434
+    visionModel: string;        // Model ID for vision tasks
+    visionBackend?: 'lmstudio' | 'ollama'; // Backend for vision - Default: 'lmstudio'
+    visionEnabled: boolean;     // Enable vision model
+    embeddingsModel: string;    // Model ID for text embeddings
+    embeddingsBackend?: 'lmstudio' | 'ollama'; // Backend for embeddings - Default: 'lmstudio'
+    embeddingsEnabled: boolean; // Enable embeddings model
+    chatModel: string;          // Model ID for chat tasks
+    chatBackend?: 'lmstudio' | 'ollama'; // Backend for chat - Default: 'lmstudio'
+    chatEnabled: boolean;       // Enable chat model
+  };
 }
 
 export interface ConversationAnnotation {

@@ -14,19 +14,25 @@ interface Conversation {
   meta?: any;
   outlierCount?: number;
   attachmentCount?: number;
+  attachmentBlobCount?: number;
+  attachmentRemoteCount?: number;
+  attachmentMissingCount?: number;
 }
 
 interface ConversationsListProps {
   conversations: Conversation[];
   selectedConversations: Set<string>;
   isMultiSelectMode: boolean;
-  onSelectConversation: (convId: string) => void;
-  onToggleConversation: (convId: string) => void;
+  onSelectConversation: (convId: string, index?: number, shiftKey?: boolean) => void;
+  onToggleConversation: (convId: string, index?: number, shiftKey?: boolean) => void;
   isLoading?: boolean;
   treeNodes?: any[];
   onNavigateToBranch?: (convId: string, branchNodeId: string) => void;
   selectedBranchPath?: string[];
-  onTagClick?: (tag: string) => void; // New: callback for tag clicks
+  onTagClick?: (tag: string) => void;
+  onAttachmentClick?: (convId: string) => void; // Filter messages with attachments
+  onMessageCountClick?: (convId: string) => void; // Filter by message count
+  onOutlierClick?: (convId: string) => void; // Filter by outliers
 }
 
 export const ConversationsList: React.FC<ConversationsListProps> = ({
@@ -39,7 +45,10 @@ export const ConversationsList: React.FC<ConversationsListProps> = ({
   treeNodes = [],
   onNavigateToBranch,
   selectedBranchPath = [],
-  onTagClick
+  onTagClick,
+  onAttachmentClick,
+  onMessageCountClick,
+  onOutlierClick
 }) => {
   const formatDate = (timestamp: number) => {
     if (!timestamp || timestamp <= 0) return '';
@@ -157,7 +166,13 @@ export const ConversationsList: React.FC<ConversationsListProps> = ({
             <div
               key={displayConvId}
               className={`aihp-conversation ${selectedConversations.has(displayConvId) ? 'selected' : ''}`}
-              onClick={() => onSelectConversation(displayConvId)}
+              onClick={(e) => {
+                if (isMultiSelectMode && e.target instanceof HTMLInputElement && e.target.type === 'checkbox') {
+                  // Don't trigger selection when clicking checkbox directly
+                  return;
+                }
+                onSelectConversation(displayConvId, index, e.shiftKey);
+              }}
               style={{ 
                 cursor: 'pointer',
                 padding: '24px 28px',
@@ -195,6 +210,21 @@ export const ConversationsList: React.FC<ConversationsListProps> = ({
                 }
               }}
             >
+              {/* Checkbox for multi-select */}
+              {isMultiSelectMode && (
+                <div className="aihp-conv-checkbox" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={selectedConversations.has(displayConvId)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      onToggleConversation(displayConvId, index, e.shiftKey);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </div>
+              )}
+              
               {/* Single row: Title + all indicators */}
               <div style={{
                 display: 'flex',
@@ -222,28 +252,59 @@ export const ConversationsList: React.FC<ConversationsListProps> = ({
                   alignSelf: 'center'
                 }} title={displayTitle}>{displayTitle}</span>
                 
-                {/* All indicators - compact but visible */}
+                {/* All indicators - larger and more visible */}
                 <div style={{
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'flex-end',
-                  gap: '6px',
+                  gap: '8px',
                   flexShrink: 0,
-                  fontSize: '10px',
                   alignSelf: 'center',
                   height: '100%'
                 }}>
-                  {/* Message count */}
-                  <span style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    opacity: 0.7,
-                    whiteSpace: 'nowrap',
-                    fontSize: '10px',
-                    lineHeight: '1'
-                  }} title={`${conv.msgCount.toLocaleString()} messages`}>
-                    💬{conv.msgCount > 999 ? `${(conv.msgCount/1000).toFixed(1)}k` : conv.msgCount}
+                  {/* Message count - larger and clickable */}
+                  <span 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (onMessageCountClick) {
+                        onMessageCountClick(displayConvId);
+                      }
+                    }}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      padding: '4px 8px',
+                      backgroundColor: 'rgba(139, 208, 255, 0.1)',
+                      borderRadius: '6px',
+                      border: '1px solid rgba(139, 208, 255, 0.2)',
+                      whiteSpace: 'nowrap',
+                      fontSize: '13px',
+                      lineHeight: '1.2',
+                      fontWeight: '500',
+                      color: '#8bd0ff',
+                      cursor: onMessageCountClick ? 'pointer' : 'default',
+                      transition: 'all 0.2s ease',
+                      minWidth: '40px',
+                      textAlign: 'center'
+                    }}
+                    onMouseEnter={(e) => {
+                      if (onMessageCountClick) {
+                        e.currentTarget.style.backgroundColor = 'rgba(139, 208, 255, 0.2)';
+                        e.currentTarget.style.borderColor = 'rgba(139, 208, 255, 0.4)';
+                        e.currentTarget.style.transform = 'scale(1.05)';
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (onMessageCountClick) {
+                        e.currentTarget.style.backgroundColor = 'rgba(139, 208, 255, 0.1)';
+                        e.currentTarget.style.borderColor = 'rgba(139, 208, 255, 0.2)';
+                        e.currentTarget.style.transform = 'scale(1)';
+                      }
+                    }}
+                    title={`${conv.msgCount.toLocaleString()} messages${onMessageCountClick ? '\n\nClick to filter messages in this conversation' : ''}`}
+                  >
+                    💬 {conv.msgCount > 999 ? `${(conv.msgCount/1000).toFixed(1)}k` : conv.msgCount}
                   </span>
                   
                   {/* Tree indicator - clickable - always show if branches exist */}
@@ -284,34 +345,105 @@ export const ConversationsList: React.FC<ConversationsListProps> = ({
                     </span>
                   )}
                   
-                  {/* Attachments - only if present */}
+                  {/* Attachments - larger, clickable, and more visible */}
                   {hasAttachments && (
-                    <span style={{
-                      opacity: 0.7,
-                      fontSize: '10px',
-                      whiteSpace: 'nowrap'
-                    }} title={`${conv.attachmentCount} attachment${conv.attachmentCount !== 1 ? 's' : ''}`}>
-                      📎{conv.attachmentCount}
+                    <span 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (onAttachmentClick) {
+                          onAttachmentClick(displayConvId);
+                        }
+                      }}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '4px 8px',
+                        backgroundColor: 'rgba(255, 193, 7, 0.15)',
+                        borderRadius: '6px',
+                        border: '1px solid rgba(255, 193, 7, 0.3)',
+                        whiteSpace: 'nowrap',
+                        fontSize: '13px',
+                        lineHeight: '1.2',
+                        fontWeight: '500',
+                        color: '#ffc107',
+                        cursor: onAttachmentClick ? 'pointer' : 'default',
+                        transition: 'all 0.2s ease',
+                        minWidth: '50px',
+                        textAlign: 'center',
+                        gap: '4px'
+                      }}
+                      onMouseEnter={(e) => {
+                        if (onAttachmentClick) {
+                          e.currentTarget.style.backgroundColor = 'rgba(255, 193, 7, 0.25)';
+                          e.currentTarget.style.borderColor = 'rgba(255, 193, 7, 0.5)';
+                          e.currentTarget.style.transform = 'scale(1.05)';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (onAttachmentClick) {
+                          e.currentTarget.style.backgroundColor = 'rgba(255, 193, 7, 0.15)';
+                          e.currentTarget.style.borderColor = 'rgba(255, 193, 7, 0.3)';
+                          e.currentTarget.style.transform = 'scale(1)';
+                        }
+                      }}
+                      title={
+                        (conv.attachmentBlobCount !== undefined 
+                          ? `${conv.attachmentBlobCount || 0} local, ${conv.attachmentRemoteCount || 0} remote, ${conv.attachmentMissingCount || 0} missing`
+                          : `${conv.attachmentCount} attachment${conv.attachmentCount !== 1 ? 's' : ''}`) +
+                        (onAttachmentClick ? '\n\nClick to filter messages with attachments' : '')
+                      }
+                    >
+                      📎 {conv.attachmentCount}
+                      {conv.attachmentRemoteCount > 0 && <span style={{color: '#ffa500', fontSize: '11px'}}>🌐</span>}
+                      {conv.attachmentMissingCount > 0 && <span style={{color: '#ff4444', fontSize: '11px'}}>⚠</span>}
                     </span>
                   )}
                   
-                  {/* Outliers - always show if present, make more visible */}
+                  {/* Outliers - larger, clickable, and more visible */}
                   {hasOutliers && (
-                    <span style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      padding: '1px 4px',
-                      backgroundColor: 'rgba(255, 193, 7, 0.15)',
-                      borderRadius: '3px',
-                      border: '1px solid rgba(255, 193, 7, 0.3)',
-                      fontSize: '9px',
-                      whiteSpace: 'nowrap',
-                      lineHeight: '1',
-                      color: '#ffc107',
-                      fontWeight: '500'
-                    }} title={`${conv.outlierCount} outlier ID${conv.outlierCount !== 1 ? 's' : ''}`}>
-                      ⭐{conv.outlierCount}
+                    <span 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (onOutlierClick) {
+                          onOutlierClick(displayConvId);
+                        }
+                      }}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '4px 8px',
+                        backgroundColor: 'rgba(255, 152, 0, 0.15)',
+                        borderRadius: '6px',
+                        border: '1px solid rgba(255, 152, 0, 0.3)',
+                        fontSize: '13px',
+                        whiteSpace: 'nowrap',
+                        lineHeight: '1.2',
+                        color: '#ff9800',
+                        fontWeight: '500',
+                        cursor: onOutlierClick ? 'pointer' : 'default',
+                        transition: 'all 0.2s ease',
+                        minWidth: '40px',
+                        textAlign: 'center'
+                      }}
+                      onMouseEnter={(e) => {
+                        if (onOutlierClick) {
+                          e.currentTarget.style.backgroundColor = 'rgba(255, 152, 0, 0.25)';
+                          e.currentTarget.style.borderColor = 'rgba(255, 152, 0, 0.5)';
+                          e.currentTarget.style.transform = 'scale(1.05)';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (onOutlierClick) {
+                          e.currentTarget.style.backgroundColor = 'rgba(255, 152, 0, 0.15)';
+                          e.currentTarget.style.borderColor = 'rgba(255, 152, 0, 0.3)';
+                          e.currentTarget.style.transform = 'scale(1)';
+                        }
+                      }}
+                      title={`${conv.outlierCount} outlier ID${conv.outlierCount !== 1 ? 's' : ''}${onOutlierClick ? '\n\nClick to filter messages with outliers' : ''}`}
+                    >
+                      ⭐ {conv.outlierCount}
                     </span>
                   )}
                   
