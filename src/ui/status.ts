@@ -36,9 +36,15 @@ class StatusBus {
     this.emit({ id,label,total,done:0, active:true, startedAt });
 
     return {
-      setTotal:(t:number)=> this.emit({ ...(this.s as StatusSnapshot), total:t }),
+      setTotal:(t:number)=> {
+        const s = this.s;
+        if (s) {
+          this.emit({ ...s, total:t });
+        }
+      },
       tick:(delta=1, sublabel?:string)=>{
-        const s = this.s as StatusSnapshot; 
+        const s = this.s; 
+        if (!s) return;
         const done = Math.max(0,(s.done??0)+delta);
         let etaSec; 
         if (s.total && done>0){ 
@@ -48,7 +54,8 @@ class StatusBus {
         this.emit({ ...s, done, sublabel, etaSec, active:true });
       },
       set:(done:number, sublabel?:string)=>{
-        const s = this.s as StatusSnapshot; 
+        const s = this.s; 
+        if (!s) return;
         let etaSec;
         if (s.total && done>0){ 
           const rate=(Date.now()-(s.startedAt||Date.now()))/done; 
@@ -56,15 +63,33 @@ class StatusBus {
         }
         this.emit({ ...s, done, sublabel, etaSec, active:true });
       },
-      label:(l:string, sub?:string)=> this.emit({ ...(this.s as StatusSnapshot), label:l, sublabel:sub }),
+      label:(l:string, sub?:string)=> {
+        const s = this.s;
+        if (s) {
+          this.emit({ ...s, label:l, sublabel:sub });
+        }
+      },
       isCancelled:()=> false, // Add missing method
-      cancel:()=> this.emit({ ...(this.s as StatusSnapshot), active:false }), // Add missing method
+      cancel:()=> {
+        const s = this.s;
+        if (s) {
+          this.emit({ ...s, active:false });
+        }
+      },
       end:()=>{
-        this.emit({ ...(this.s as StatusSnapshot), active:false });
+        const s = this.s;
+        if (s) {
+          this.emit({ ...s, active:false });
+        }
         if (this.timer) clearTimeout(this.timer);
         this.timer = window.setTimeout(()=>this.emit(undefined), 1000);
       },
-      fail:(err:string)=> this.emit({ ...(this.s as StatusSnapshot), active:false, error: err })
+      fail:(err:string)=> {
+        const s = this.s;
+        if (s) {
+          this.emit({ ...s, active:false, error: err });
+        }
+      }
     };
   }
 }

@@ -17,6 +17,7 @@ import { discoverSubfolders, getSourceLabel, formatSourcePath, type DiscoveredSu
 import { detectVendor, generateSourceId, pickColor, makeSourceLabel, parseExportInfo } from "./settings";
 import { MessageContent } from "./components/ToolBlock";
 import { CollectionGripper } from "./components/CollectionGripper";
+import { SearchMatchNavigator } from "./components/SearchMatchNavigator";
 import { HeaderProgress } from "./ui/HeaderProgress";
 import { Paginator } from "./components/Paginator";
 import { usePagination } from "./hooks/usePagination";
@@ -63,15 +64,41 @@ export class ParserView extends ItemView {
   getIcon() { return "blocks"; }
 
   async onOpen() {
-    this.contentEl.empty();
-    this.contentEl.addClass("aihp-root");
-    this.root = ReactDOM.createRoot(this.contentEl);
-    
-    // Version banner for debugging
-    console.info("AIHP View opened - DB-first mode active");
-    
-    // Render UI immediately - loading will be deferred inside the component
-    this.root.render(<UI plugin={this.plugin} viewInstance={this} />);
+    try {
+      this.contentEl.empty();
+      this.contentEl.addClass("aihp-root");
+      this.root = ReactDOM.createRoot(this.contentEl);
+      
+      // Version banner for debugging
+      console.info("AIHP View opened - DB-first mode active");
+      
+      // Suppress attachment:// URL errors (Obsidian-specific URLs)
+      const originalError = console.error;
+      console.error = (...args: any[]) => {
+        const message = args.join(' ');
+        // Suppress ERR_UNKNOWN_URL_SCHEME for attachment:// URLs
+        if (message.includes('ERR_UNKNOWN_URL_SCHEME') && message.includes('attachment://')) {
+          return; // Silently ignore attachment URL errors
+        }
+        originalError.apply(console, args);
+      };
+      
+      // Render UI immediately - loading will be deferred inside the component
+      console.log("🔄 Rendering UI component...");
+      this.root.render(<UI plugin={this.plugin} viewInstance={this} />);
+      console.log("✅ UI component rendered successfully");
+    } catch (error: any) {
+      console.error("❌ Failed to open view:", error);
+      this.contentEl.innerHTML = `
+        <div style="padding: 20px; color: var(--text-error);">
+          <h2>Error Loading View</h2>
+          <p>${error.message || String(error)}</p>
+          <pre style="background: var(--background-secondary); padding: 10px; border-radius: 4px; overflow: auto;">
+            ${error.stack || ''}
+          </pre>
+        </div>
+      `;
+    }
   }
 
   async onClose() {
@@ -291,6 +318,44 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
 
   // Debounce search query
   const debouncedQuery = useDebounce(searchQuery, 300);
+  
+  // Search match navigation state (declared early for use in effects)
+  const matchCounterRef = useRef<{ current: number }>({ current: 0 });
+  
+  // Reset match counter when query changes
+  useEffect(() => {
+    if (debouncedQuery.trim()) {
+      matchCounterRef.current.current = 0;
+      setCurrentMatchIndex(0);
+      setSearchMatchCount(0);
+      setShowMatchNavigator(true);
+    } else {
+      setShowMatchNavigator(false);
+      setSearchMatchCount(0);
+      setCurrentMatchIndex(0);
+    }
+  }, [debouncedQuery]);
+  
+  // Scroll to match function
+  const scrollToMatch = useCallback((matchIndex: number) => {
+    const matchElement = document.getElementById(`search-match-${matchIndex}`);
+    if (matchElement) {
+      matchElement.scrollIntoView({ 
+        behavior: 'smooth', 
+        block: 'center',
+        inline: 'nearest'
+      });
+      // Highlight the match briefly
+      matchElement.style.backgroundColor = 'rgba(255, 255, 0, 0.8)';
+      matchElement.style.transition = 'background-color 0.3s ease';
+      setTimeout(() => {
+        matchElement.style.backgroundColor = 'rgba(255, 255, 0, 0.4)';
+      }, 1000);
+      setCurrentMatchIndex(matchIndex);
+    }
+  }, []);
+  
+  // Count matches after render - moved below to avoid TDZ error with pagedConvTurns
 
   // Calculate filter hash for pagination reset
   const filterHash = useMemo(() => {
@@ -503,6 +568,11 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     text: string;
     position: { x: number; y: number };
   }>({ show: false, text: '', position: { x: 0, y: 0 } });
+  
+  // Search match navigation state
+  const [searchMatchCount, setSearchMatchCount] = useState(0);
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const [showMatchNavigator, setShowMatchNavigator] = useState(false);
   
   // Loading screen state
   const [loadingSteps, setLoadingSteps] = useState<LoadingStep[]>([]);
@@ -820,6 +890,29 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     currentFilterHash: `${filterHash}|conv=${selectedConvKey || 'none'}|branch=${selectedBranchPath.join(',')}`
   });
 
+  // Count matches after render
+  // Note: We use a timeout to ensure DOM is updated after pagination changes
+  useEffect(() => {
+    if (debouncedQuery.trim() && showMatchNavigator) {
+      // Use a small delay to ensure DOM is updated after pagination
+      const timeoutId = setTimeout(() => {
+        // Count all matches in the DOM
+        const matches = document.querySelectorAll('[data-match-index]');
+        const count = matches.length;
+        if (count > 0) {
+          setSearchMatchCount(count);
+          if (currentMatchIndex === 0) {
+            setCurrentMatchIndex(1);
+          }
+        } else {
+          setSearchMatchCount(0);
+        }
+      }, 100);
+      
+      return () => clearTimeout(timeoutId);
+    }
+  }, [debouncedQuery, showMatchNavigator, currentMatchIndex, pagedConvTurns]);
+
   // NOTE: Folder parsing is now disabled - use refreshFromDB instead
   // All folder parsing code has been removed - plugin now reads from external DB only
   
@@ -834,22 +927,24 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
     }
 
     setMessagesLoading(true);
-    setStatus("loading");
-    // Only show loading screen for non-search operations (initial load, manual refresh, etc.)
+    // Only show loading screen and status for non-search operations (initial load, manual refresh, etc.)
     if (showLoading) {
+      setStatus("loading");
       setShowLoadingScreen(true);
+      // Initialize loading steps only when showing loading screen
+      const initialSteps: LoadingStep[] = [
+        { name: "Checking database file", status: 'pending' },
+        { name: "Connecting to database", status: 'pending' },
+        { name: "Querying conversations", status: 'pending' },
+        { name: "Loading messages", status: 'pending' },
+        { name: "Processing tree structure", status: 'pending' },
+        { name: "Finalizing data", status: 'pending' }
+      ];
+      setLoadingSteps(initialSteps);
+    } else {
+      // For search operations, just set a subtle status
+      setStatus("searching");
     }
-    
-    // Initialize loading steps
-    const initialSteps: LoadingStep[] = [
-      { name: "Checking database file", status: 'pending' },
-      { name: "Connecting to database", status: 'pending' },
-      { name: "Querying conversations", status: 'pending' },
-      { name: "Loading messages", status: 'pending' },
-      { name: "Processing tree structure", status: 'pending' },
-      { name: "Finalizing data", status: 'pending' }
-    ];
-    setLoadingSteps(initialSteps);
     
     // Helper to update loading steps
     const updateStep = (stepName: string, updates: Partial<LoadingStep>) => {
@@ -1134,6 +1229,9 @@ function UI({ plugin, viewInstance }: { plugin: AIHistoryParser; viewInstance?: 
                 setTimeout(() => {
                   setShowLoadingScreen(false);
                 }, 500);
+              } else {
+                // For search operations, ensure status is cleared
+                setStatus("ready");
               }
     } catch (e: any) {
               progressHandle.fail(`Failed to parse DB response: ${e.message}`);
@@ -1902,17 +2000,49 @@ con.close()
     return () => clearTimeout(timer);
   }, [hasInitialized, plugin.settings.pythonPipeline?.dbPath, refreshFromDB]);
   
-  // Reload when DB path changes (but only if already initialized)
+  // Reload when DB path changes (but only if already initialized) - DEBOUNCED
+  const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastDbPathRef = useRef<string | undefined>(undefined);
+  
   useEffect(() => {
-    if (hasInitialized && plugin.settings.pythonPipeline?.dbPath) {
+    const currentDbPath = plugin.settings.pythonPipeline?.dbPath;
+    
+    // Clear any pending refresh
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+      refreshTimeoutRef.current = null;
+    }
+    
+    if (!hasInitialized) {
+      return;
+    }
+    
+    if (!currentDbPath) {
+      setError("Database path not configured in settings");
+      return;
+    }
+    
+    // Only refresh if path actually changed
+    if (lastDbPathRef.current === currentDbPath) {
+      return;
+    }
+    
+    lastDbPathRef.current = currentDbPath;
+    
+    // Debounce refresh by 1 second to prevent multiple rapid refreshes
+    refreshTimeoutRef.current = setTimeout(() => {
       console.log("🔄 DB path changed, reloading...");
       refreshFromDB().catch(err => {
         console.error("❌ Reload failed:", err);
         setError(err.message || String(err));
       });
-    } else if (!plugin.settings.pythonPipeline?.dbPath) {
-      setError("Database path not configured in settings");
-    }
+    }, 1000);
+    
+    return () => {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+      }
+    };
   }, [hasInitialized, plugin.settings.pythonPipeline?.dbPath, refreshFromDB]);
 
   // Load database stats on mount
@@ -2014,6 +2144,19 @@ con.close()
   const [isResizingCollectionPopout, setIsResizingCollectionPopout] = useState(false);
   const resizeStartXRef = useRef(0);
   const resizeStartWidthRef = useRef(collectionPopoutWidth);
+  // Get theme preset from settings
+  const themePreset = (plugin.settings as any).themePreset || 'default';
+  const themeColors: Record<string, { base: string; hover: string; border: string; glow: string }> = {
+    'default': { base: '#8bd0ff', hover: '#6bb5ff', border: '#4a9eff', glow: 'rgba(139, 208, 255, 0.4)' },
+    'dark-blue': { base: '#4a9eff', hover: '#3a8eef', border: '#2a7edf', glow: 'rgba(74, 158, 255, 0.4)' },
+    'purple': { base: '#a78bfa', hover: '#8b6bfa', border: '#6d4bfa', glow: 'rgba(167, 139, 250, 0.4)' },
+    'green': { base: '#34d399', hover: '#24c389', border: '#14b379', glow: 'rgba(52, 211, 153, 0.4)' },
+    'orange': { base: '#fb923c', hover: '#eb823c', border: '#db723c', glow: 'rgba(251, 146, 60, 0.4)' },
+    'red': { base: '#f87171', hover: '#e86161', border: '#d85151', glow: 'rgba(248, 113, 113, 0.4)' },
+    'cyan': { base: '#22d3ee', hover: '#12c3de', border: '#02b3ce', glow: 'rgba(34, 211, 238, 0.4)' },
+    'pink': { base: '#f472b6', hover: '#e462a6', border: '#d45296', glow: 'rgba(244, 114, 182, 0.4)' }
+  };
+  
   const collectionThemes = useMemo(() => ([
     { base: '#f97316', hover: '#fb923c', border: '#f97316', glow: 'rgba(249,115,22,0.45)', emoji: '📦' },
     { base: '#6366f1', hover: '#8b5cf6', border: '#6366f1', glow: 'rgba(99,102,241,0.45)', emoji: '🗂️' },
@@ -2074,7 +2217,9 @@ con.close()
     };
   }, [isResizingCollectionPopout]);
 
-  const collectionTheme = collectionThemes[collectionThemeIndex % collectionThemes.length];
+  // Use preset theme if available, otherwise use random theme
+  const presetTheme = themeColors[themePreset];
+  const collectionTheme = presetTheme || collectionThemes[collectionThemeIndex % collectionThemes.length];
   const collectionButtonStyle: React.CSSProperties = buildCollectionButtonStyle(showCollectionPopout, collectionButtonHover, 'primary');
   const collectionToolbarStyle: React.CSSProperties = buildCollectionButtonStyle(showCollectionPopout, collectionToolbarHover, 'toolbar');
 
@@ -2091,11 +2236,35 @@ con.close()
       if (selection && selection.toString().trim().length > 10) {
         const text = selection.toString().trim();
         const range = selection.getRangeAt(0);
-        const rect = range.getBoundingClientRect();
+        
+        // Position gripper near mouse cursor, offset slightly to avoid covering selection
+        const offsetX = 15; // Offset from mouse cursor
+        const offsetY = -5; // Slightly above cursor
+        let x = e.clientX + offsetX;
+        let y = e.clientY + offsetY;
+        
+        // Ensure gripper stays within viewport
+        const gripperWidth = 220; // Approximate width
+        const gripperHeight = 250; // Approximate max height
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        
+        // Adjust if too far right
+        if (x + gripperWidth > viewportWidth - 10) {
+          x = e.clientX - gripperWidth - offsetX; // Show to the left instead
+        }
+        // Adjust if too far down
+        if (y + gripperHeight > viewportHeight - 10) {
+          y = e.clientY - gripperHeight - offsetY; // Show above instead
+        }
+        // Ensure minimum margins
+        x = Math.max(10, Math.min(x, viewportWidth - gripperWidth - 10));
+        y = Math.max(10, Math.min(y, viewportHeight - gripperHeight - 10));
+        
         setGripperState({
           show: true,
           text,
-          position: { x: rect.right + 10, y: rect.top }
+          position: { x, y }
         });
       } else if (gripperState.show) {
         // Close gripper if selection cleared
@@ -2111,9 +2280,41 @@ con.close()
     return () => document.removeEventListener('mouseup', handleMouseUp);
   }, [gripperState.show]);
 
+  // Error boundary wrapper
+  const ErrorBoundary = ({ children }: { children: React.ReactNode }) => {
+    const [hasError, setHasError] = React.useState(false);
+    const [error, setError] = React.useState<Error | null>(null);
+
+    React.useEffect(() => {
+      const handleError = (event: ErrorEvent) => {
+        console.error("❌ React Error:", event.error);
+        setError(event.error);
+        setHasError(true);
+      };
+
+      window.addEventListener('error', handleError);
+      return () => window.removeEventListener('error', handleError);
+    }, []);
+
+    if (hasError) {
+      return (
+        <div style={{ padding: '20px', color: 'var(--text-error)' }}>
+          <h2>UI Rendering Error</h2>
+          <p>{error?.message || 'Unknown error'}</p>
+          <button onClick={() => { setHasError(false); setError(null); window.location.reload(); }}>
+            Reload View
+          </button>
+        </div>
+      );
+    }
+
+    return <>{children}</>;
+  };
+
   return (
-    <CollectionProvider plugin={plugin}>
-    {showLoadingScreen && (
+    <ErrorBoundary>
+      <CollectionProvider plugin={plugin}>
+      {showLoadingScreen && (
       <LoadingScreen
         steps={loadingSteps}
         currentStep={loadingSteps.find(s => s.status === 'loading')?.name}
@@ -2177,18 +2378,6 @@ con.close()
               {showDevInfo ? '🔧 Dev' : '⚙️'}
             </button>
             
-            <button
-              className="aihp-btn"
-              onClick={async () => {
-                const leaf = plugin.app.workspace.openPopoutLeaf();
-                await leaf.setViewState({ type: VIEW_TYPE, active: true });
-                new Notice('Opened in popout window');
-              }}
-              title="Open in popout window (full screen)"
-              style={{ fontSize: '11px', padding: '4px 8px' }}
-            >
-              🔲 Popout
-            </button>
             
             <button 
               className="aihp-btn" 
@@ -2251,33 +2440,63 @@ con.close()
                   refreshFromDB(query);
                 }}
                 placeholder={selfCheckResult?.fullTextSearch?.enabled 
-                  ? "🔍 Search messages (FTS5 indexed)… (prefix with / for regex)" 
-                  : "🔍 Search messages… (prefix with / for regex)"}
+                  ? "Search messages (FTS5 indexed)… (prefix with / for regex)" 
+                  : "Search messages… (prefix with / for regex)"}
                 maxHistory={75}
                 showSuggestions={true}
                 accentTheme={collectionTheme}
                 trendingLimit={5}
-                onSaveSearch={(query) => {
-                  // Save search to a new collection
-                  const newCollection = {
-                    id: `search_${Date.now()}`,
-                    label: `Search: ${query.substring(0, 30)}${query.length > 30 ? '...' : ''}`,
-                    content: `# Saved Search\n\n**Query:** ${query}\n\n**Saved:** ${new Date().toLocaleString()}\n\n---\n\n*Use this collection to track results for this search query.*`,
-                    createdAt: Date.now(),
-                    itemCount: 0,
-                    color: undefined,
-                    tags: [],
-                    summary: '',
-                    tableOfContents: '',
-                    enrichedAt: undefined,
-                    enrichModel: undefined,
-                    enrichDuration: undefined,
-                    generatedTitle: undefined,
-                    savedVersions: []
-                  };
-                  setCollections(prev => [...prev, newCollection]);
-                  setActiveCollectionId(newCollection.id);
-                  new Notice(`Search saved to collection: ${newCollection.label}`);
+                onSaveSearch={async (query) => {
+                  // Save search to a new collection asynchronously
+                  try {
+                    const newCollection: Collection = {
+                      id: `search_${Date.now()}`,
+                      label: `Search: ${query.substring(0, 30)}${query.length > 30 ? '...' : ''}`,
+                      content: `# Saved Search\n\n**Query:** ${query}\n\n**Saved:** ${new Date().toLocaleString()}\n\n**Search Parameters:**\n- Query: \`${query}\`\n- Type: Message Search\n\n---\n\n*Click this collection to re-run this search query.*`,
+                      createdAt: Date.now(),
+                      itemCount: 0,
+                      color: '#4a9eff',
+                      tags: ['saved-search', 'search'],
+                      summary: `Saved search query: ${query}`,
+                      tableOfContents: [],
+                      enrichedAt: undefined,
+                      enrichModel: undefined,
+                      enrichDuration: undefined,
+                      generatedTitle: undefined,
+                      savedVersions: []
+                    };
+                    
+                    // Check if collection with same query already exists BEFORE adding
+                    const existing = collections.find(c => 
+                      c.tags?.includes('saved-search') && 
+                      c.content.includes(`Query: \`${query}\``)
+                    );
+                    if (existing) {
+                      new Notice(`ℹ️ Search already saved in collection: ${existing.label}`);
+                      return;
+                    }
+                    
+                    // Add to collections state - this will trigger persistence if usingDatabase is true
+                    setCollections(prev => {
+                      const updated = [...prev, newCollection];
+                      console.log('[Save Search] Added collection:', newCollection.id, 'Total collections:', updated.length);
+                      return updated;
+                    });
+                    
+                    // Ensure collections panel is visible so user can see the new collection
+                    if (!showCollectionPopout) {
+                      setShowCollectionPopout(true);
+                    }
+                    
+                    // Show success notice - collection will be persisted automatically by CollectionPanel's useEffect
+                    new Notice(`✅ Search saved to collection: ${newCollection.label}`);
+                    
+                    // Small delay to ensure UI updates
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                  } catch (error: any) {
+                    console.error('Failed to save search:', error);
+                    new Notice(`❌ Failed to save search: ${error.message}`);
+                  }
                 }}
                 collections={collections.map(c => ({ id: c.id, label: c.label }))}
               />
@@ -2286,13 +2505,15 @@ con.close()
                   onClick={async () => {
                     try {
                       setStatus("Exporting search results...");
-                      const dbPath = plugin.settings.databasePath || plugin.settings.sources[0]?.databasePath;
+                      const dbPath = plugin.settings.pythonPipeline?.dbPath;
                       if (!dbPath) {
-                        throw new Error("No database path configured");
+                        throw new Error("No database path configured. Please set it in plugin settings.");
                       }
+                      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+                      const resolvedDbPath = resolveVaultPath(dbPath, vaultBasePath);
                       const outputPath = await exportSearchResults(
                         plugin.app,
-                        dbPath,
+                        resolvedDbPath,
                         searchQuery,
                         { format: "markdown", includeContext: true }
                       );
@@ -2340,33 +2561,13 @@ con.close()
           </div>
 
           {/* RIGHT: Header actions */}
-          <div className="aip-header-right" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <button
-              onClick={() => setShowCollectionPopout(prev => !prev)}
-              onMouseEnter={() => setCollectionButtonHover(true)}
-              onMouseLeave={() => setCollectionButtonHover(false)}
-              style={buildCollectionButtonStyle(showCollectionPopout, collectionButtonHover, 'primary')}
-              title={showCollectionPopout ? "Hide collections panel" : "Show collections panel"}
-            >
-              <span>{collectionTheme.emoji}</span>
-              <span>Collections LOCAL</span>
-              <span style={{
-                fontSize: '10px',
-                padding: '2px 6px',
-                borderRadius: '999px',
-                backgroundColor: 'rgba(0, 0, 0, 0.25)',
-                color: '#fff',
-                lineHeight: 1.2
-              }}>
-                {usingDatabase ? 'DB' : 'LOCAL'}
-              </span>
-            </button>
-            <button 
-              className="aihp-btn"
-              onClick={() => plugin.app.workspace.openPopoutLeaf().setViewState({ type: VIEW_TYPE, active: true })}
-            >
-              Pop-out
-            </button>
+          <div className="aip-header-right" style={{ 
+            display: 'flex', 
+            alignItems: 'center', 
+            gap: '8px',
+            marginRight: showCollectionPopout ? `${collectionPopoutWidth}px` : '0px',
+            transition: 'margin-right 0.2s ease'
+          }}>
             <label className="aip-toggle">
               <input
                 type="checkbox"
@@ -2552,7 +2753,7 @@ con.close()
       {useNewView ? (
         <TestView messages={messages} />
       ) : (
-      <div className="aip-body" style={{ display: 'grid', gridTemplateRows: '1fr', gridTemplateColumns: showCollectionPopout ? `var(--aip-col-left, 320px) 1fr ${collectionPopoutWidth}px` : `var(--aip-col-left, 320px) 1fr 0px`, gap: '0px', overflow: 'hidden', height: '100%', minHeight: 0, flex: 1, padding: 0, marginTop: 0, marginRight: showCollectionPopout ? `${collectionPopoutWidth}px` : '0px' }}>
+      <div className="aip-body" style={{ display: 'grid', gridTemplateRows: '1fr', gridTemplateColumns: `var(--aip-col-left, 320px) 1fr`, gap: '0px', overflow: 'hidden', height: '100%', minHeight: 0, flex: 1, padding: 0, marginTop: 0, marginRight: showCollectionPopout ? `${collectionPopoutWidth}px` : '0px' }}>
         {/* Left Pane: Conversation List */}
         <section className="aip-pane aip-conversations-middle" style={{
           display: 'flex',
@@ -2678,7 +2879,14 @@ con.close()
         </section>
 
         {/* Center Pane: Selected Conversation Messages + Pagination */}
-        <section className="aip-pane aip-center">
+        <section className="aip-pane aip-center" style={{ 
+          display: 'flex', 
+          flexDirection: 'column', 
+          width: '100%', 
+          minWidth: 0, 
+          flex: 1, 
+          overflow: 'hidden' 
+        }}>
           <LoadingOverlay isLoading={isSearching} text="Searching messages...">
             {/* Consolidated Message Toolbar - Single unified bar */}
             {(activeTagFilter || selectedConvKey) && (
@@ -2815,6 +3023,43 @@ con.close()
                     />
                     <span style={{ fontSize: '12px' }}>Select Messages</span>
                   </label>
+                  
+                  {/* Select All / Deselect All */}
+                  {isMessageSelectMode && selectedConvMessages.length > 0 && (
+                    <button
+                      onClick={() => {
+                        if (selectedMessages.size === selectedConvMessages.length) {
+                          // Deselect all
+                          setSelectedMessages(new Set());
+                          setSelectedTextSelections(new Map());
+                        } else {
+                          // Select all
+                          const allMessageIds = new Set(selectedConvMessages.map(m => m.id));
+                          setSelectedMessages(allMessageIds);
+                          // Store text selections for all messages
+                          const textSelections = new Map<string, string>();
+                          selectedConvMessages.forEach(msg => {
+                            textSelections.set(msg.id, msg.text);
+                          });
+                          setSelectedTextSelections(textSelections);
+                        }
+                      }}
+                      style={{
+                        padding: '4px 8px',
+                        fontSize: '11px',
+                        fontWeight: '600',
+                        border: '1px solid var(--background-modifier-border)',
+                        borderRadius: '4px',
+                        background: 'var(--background-secondary)',
+                        color: '#ffffff',
+                        cursor: 'pointer',
+                        marginLeft: '8px'
+                      }}
+                      title={selectedMessages.size === selectedConvMessages.length ? "Deselect all messages" : "Select all messages"}
+                    >
+                      {selectedMessages.size === selectedConvMessages.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                  )}
                   
                   {/* Add Selected Messages to Collection */}
                   {isMessageSelectMode && selectedMessages.size > 0 && collections.length > 0 && (
@@ -3240,8 +3485,10 @@ con.close()
                           toolPayload={null}
                           query={debouncedQuery}
                           useRegex={facets.regex}
-                          highlightText={highlightText}
-                              app={plugin.app}
+                          highlightText={(text, query, useRegex) => 
+                            highlightText(text, query, useRegex, matchCounterRef.current)
+                          }
+                          app={plugin.app}
                         />
                           </div>
                         <div className="aihp-message-meta">
@@ -3313,9 +3560,11 @@ con.close()
             top: 0,
             bottom: 0,
             backgroundColor: 'var(--background-primary)',
-            zIndex: 100,
+            zIndex: 1000,
             marginTop: 0,
-            paddingTop: 0
+            paddingTop: 0,
+            visibility: 'visible',
+            opacity: 1
           }}
         >
           <CollectionPanel onCollectionUpdate={setCollections} plugin={plugin} />
@@ -3594,7 +3843,19 @@ con.close()
           onClose={() => setGripperState({ show: false, text: '', position: { x: 0, y: 0 } })}
         />
       )}
-    </CollectionProvider>
+      
+      {/* Search Match Navigator - Chrome-style match navigation */}
+      {showMatchNavigator && searchMatchCount > 0 && (
+        <SearchMatchNavigator
+          query={debouncedQuery}
+          totalMatches={searchMatchCount}
+          currentMatchIndex={currentMatchIndex}
+          onNavigate={scrollToMatch}
+          onClose={() => setShowMatchNavigator(false)}
+        />
+      )}
+      </CollectionProvider>
+    </ErrorBoundary>
   );
 }
 

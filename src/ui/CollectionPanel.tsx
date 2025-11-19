@@ -64,6 +64,7 @@ interface CollectionContextType {
   addToCollection: (collectionId: string, text: string, append?: boolean) => void;
   setCollections: React.Dispatch<React.SetStateAction<Collection[]>>;
   usingDatabase: boolean;
+  refreshCollections?: () => Promise<void>;
 }
 
 const CollectionContext = createContext<CollectionContextType | null>(null);
@@ -120,6 +121,127 @@ export const CollectionProvider: React.FC<CollectionProviderProps> = ({ plugin, 
     collectionsRef.current = collections;
   }, [collections]);
 
+  // Extract load function so it can be reused for refresh - MUST be outside useEffect
+  const loadFromDatabase = useCallback(async () => {
+    try {
+      // Double-check plugin is ready
+      if (!plugin || !plugin.settings) {
+        console.warn('[Collections] Plugin still not ready after delay');
+        setUsingDatabase(false);
+        return;
+      }
+
+      const pipeline = plugin.settings.pythonPipeline;
+      if (!pipeline?.dbPath || !pipeline?.scriptsRoot || !pipeline?.pythonExecutable) {
+        setUsingDatabase(false);
+        return;
+      }
+
+      // Use async file checks with timeout
+      const checkFile = (filePath: string): Promise<boolean> => {
+        return new Promise((resolve) => {
+          const timeout = setTimeout(() => resolve(false), 1000);
+          try {
+            const exists = fs.existsSync(filePath);
+            clearTimeout(timeout);
+            resolve(exists);
+          } catch {
+            clearTimeout(timeout);
+            resolve(false);
+          }
+        });
+      };
+
+      const scriptPath = path.join(pipeline.scriptsRoot, 'collection_store.py');
+      const scriptExists = await checkFile(scriptPath);
+      if (!scriptExists) {
+        console.warn('[Collections] collection_store.py not found at', scriptPath);
+        setUsingDatabase(false);
+        return;
+      }
+
+      if (!plugin.app || !plugin.app.vault || !plugin.app.vault.adapter) {
+        console.warn('[Collections] Plugin app not ready');
+        setUsingDatabase(false);
+        return;
+      }
+      const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
+      const dbPath = resolveVaultPath(pipeline.dbPath, vaultBasePath);
+      const dbExists = await checkFile(dbPath);
+      if (!dbExists) {
+        console.warn('[Collections] Database not found at', dbPath);
+        setUsingDatabase(false);
+        return;
+      }
+
+      // Add timeout to Python script execution
+      const loadPromise = runPythonJson<{ collections: any[] }>([
+        pipeline.pythonExecutable || 'python',
+        scriptPath,
+        '--db',
+        dbPath,
+        '--action',
+        'list'
+      ]);
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Database load timeout')), 5000);
+      });
+
+      const result = await Promise.race([loadPromise, timeoutPromise]);
+
+      const mapped = (result.collections || []).map((item) => {
+        const content = item.content || '';
+        const itemCount = content.split('\n').filter((l: string) => l.trim().length > 0).length;
+        return {
+          id: item.id,
+          label: item.label || 'Untitled Collection',
+          content,
+          color: item.color || undefined,
+          tags: Array.isArray(item.tags) ? item.tags : (item.tags ? item.tags : []),
+          summary: item.summary || '',
+          tableOfContents: Array.isArray(item.tableOfContents) ? item.tableOfContents : (item.tableOfContents || []),
+          enrichedAt: item.enrichedAt || item.enriched_at || null,
+          createdAt: item.createdAt || item.created_at || Date.now(),
+          updatedAt: item.updatedAt || item.updated_at || Date.now(),
+          itemCount
+        } as Collection;
+      });
+
+      setCollections(mapped);
+      const map = new Map<string, string>();
+      mapped.forEach(coll => {
+        map.set(coll.id, JSON.stringify({
+          id: coll.id,
+          label: coll.label,
+          content: coll.content,
+          color: coll.color || null,
+          tags: coll.tags || [],
+          summary: coll.summary || '',
+          tableOfContents: coll.tableOfContents || [],
+          enrichedAt: coll.enrichedAt || null,
+          createdAt: coll.createdAt || Date.now()
+        }));
+      });
+      prevSerializedRef.current = map;
+      setUsingDatabase(true);
+    } catch (error) {
+      console.error('[Collections] Failed to load from database:', error);
+      setUsingDatabase(false);
+      // Fallback to localStorage if database fails
+      try {
+        const saved = localStorage.getItem('aihp-collections');
+        if (saved) {
+          const localCollections = JSON.parse(saved);
+          setCollections(localCollections);
+        }
+      } catch (e) {
+        console.error('[Collections] Failed to load from localStorage:', e);
+      }
+      throw error; // Re-throw so caller can handle it
+    }
+  }, [plugin]);
+
   useEffect(() => {
     // Defer ALL initialization to avoid blocking Obsidian startup
     // Check if plugin is ready first
@@ -129,130 +251,11 @@ export const CollectionProvider: React.FC<CollectionProviderProps> = ({ plugin, 
     }
 
     const timeoutId = setTimeout(() => {
-      const loadFromDatabase = async () => {
-        try {
-          // Double-check plugin is ready
-          if (!plugin || !plugin.settings) {
-            console.warn('[Collections] Plugin still not ready after delay');
-            setUsingDatabase(false);
-            return;
-          }
-
-          const pipeline = plugin.settings.pythonPipeline;
-          if (!pipeline?.dbPath || !pipeline?.scriptsRoot || !pipeline?.pythonExecutable) {
-            setUsingDatabase(false);
-            return;
-          }
-
-          // Use async file checks with timeout
-          const checkFile = (filePath: string): Promise<boolean> => {
-            return new Promise((resolve) => {
-              const timeout = setTimeout(() => resolve(false), 1000);
-              try {
-                const exists = fs.existsSync(filePath);
-                clearTimeout(timeout);
-                resolve(exists);
-              } catch {
-                clearTimeout(timeout);
-                resolve(false);
-              }
-            });
-          };
-
-          const scriptPath = path.join(pipeline.scriptsRoot, 'collection_store.py');
-          const scriptExists = await checkFile(scriptPath);
-          if (!scriptExists) {
-            console.warn('[Collections] collection_store.py not found at', scriptPath);
-            setUsingDatabase(false);
-            return;
-          }
-
-          if (!plugin.app || !plugin.app.vault || !plugin.app.vault.adapter) {
-            console.warn('[Collections] Plugin app not ready');
-            setUsingDatabase(false);
-            return;
-          }
-          const vaultBasePath = (plugin.app.vault.adapter as any).basePath || '';
-          const dbPath = resolveVaultPath(pipeline.dbPath, vaultBasePath);
-          const dbExists = await checkFile(dbPath);
-          if (!dbExists) {
-            console.warn('[Collections] Database not found at', dbPath);
-            setUsingDatabase(false);
-            return;
-          }
-
-          // Add timeout to Python script execution
-          const loadPromise = runPythonJson<{ collections: any[] }>([
-            pipeline.pythonExecutable || 'python',
-            scriptPath,
-            '--db',
-            dbPath,
-            '--action',
-            'list'
-          ]);
-
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('Database load timeout')), 5000);
-          });
-
-          const result = await Promise.race([loadPromise, timeoutPromise]);
-
-          const mapped = (result.collections || []).map((item) => {
-            const content = item.content || '';
-            const itemCount = content.split('\n').filter((l: string) => l.trim().length > 0).length;
-            return {
-              id: item.id,
-              label: item.label || 'Untitled Collection',
-              content,
-              color: item.color || undefined,
-              tags: Array.isArray(item.tags) ? item.tags : (item.tags ? item.tags : []),
-              summary: item.summary || '',
-              tableOfContents: Array.isArray(item.tableOfContents) ? item.tableOfContents : (item.tableOfContents || []),
-              enrichedAt: item.enrichedAt || item.enriched_at || null,
-              createdAt: item.createdAt || item.created_at || Date.now(),
-              updatedAt: item.updatedAt || item.updated_at || Date.now(),
-              itemCount
-            } as Collection;
-          });
-
-          setCollections(mapped);
-          const map = new Map<string, string>();
-          mapped.forEach(coll => {
-            map.set(coll.id, JSON.stringify({
-              id: coll.id,
-              label: coll.label,
-              content: coll.content,
-              color: coll.color || null,
-              tags: coll.tags || [],
-              summary: coll.summary || '',
-              tableOfContents: coll.tableOfContents || [],
-              enrichedAt: coll.enrichedAt || null,
-              createdAt: coll.createdAt || Date.now()
-            }));
-          });
-          prevSerializedRef.current = map;
-          setUsingDatabase(true);
-        } catch (error) {
-          console.error('[Collections] Failed to load from database:', error);
-          setUsingDatabase(false);
-          // Fallback to localStorage if database fails
-          try {
-            const saved = localStorage.getItem('aihp-collections');
-            if (saved) {
-              const localCollections = JSON.parse(saved);
-              setCollections(localCollections);
-            }
-          } catch (e) {
-            console.error('[Collections] Failed to load from localStorage:', e);
-          }
-        }
-      };
-
       void loadFromDatabase();
     }, 1000); // Defer by 1 second to let Obsidian finish loading
 
     return () => clearTimeout(timeoutId);
-  }, [plugin]);
+  }, [plugin, loadFromDatabase]);
 
   const persistCollections = useCallback(async () => {
     if (!usingDatabase) return;
@@ -396,8 +399,18 @@ export const CollectionProvider: React.FC<CollectionProviderProps> = ({ plugin, 
     }
   }, [collections]);
 
+  // Create refresh function that wraps loadFromDatabase
+  const refreshCollections = useCallback(async () => {
+    try {
+      await loadFromDatabase();
+      new Notice('✅ Collections refreshed');
+    } catch (error: any) {
+      new Notice(`❌ Failed to refresh collections: ${error.message}`);
+    }
+  }, [loadFromDatabase]);
+
   return (
-    <CollectionContext.Provider value={{ collections, addToCollection, setCollections, usingDatabase }}>
+    <CollectionContext.Provider value={{ collections, addToCollection, setCollections, usingDatabase, refreshCollections }}>
       {children}
     </CollectionContext.Provider>
   );
@@ -441,6 +454,7 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
   const [showProjectModal, setShowProjectModal] = useState(false);  // Show add to project modal
   const [collectionPage, setCollectionPage] = useState(1);
   const [collectionPageSize] = useState(10);
+  const [hoveredCollectionId, setHoveredCollectionId] = useState<string | null>(null);
   const MAX_VISIBLE_TAGS = 5;  // Show top 5 tags, rest in modal
 
   // Save collection version to history
@@ -1042,15 +1056,51 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
         flexShrink: 0
       }}>
         <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center'
-      }}>
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
           <h3 style={{ margin: 0, fontSize: '15px', fontWeight: '800', color: '#ffffff' }}>Collections</h3>
           <div style={{ display: 'flex', gap: '4px' }}>
-        <button
+            {refreshCollections && (
+              <button
+                onClick={async () => {
+                  setIsRefreshing(true);
+                  try {
+                    await refreshCollections();
+                  } finally {
+                    setIsRefreshing(false);
+                  }
+                }}
+                disabled={isRefreshing}
+                style={{
+                  padding: '6px 10px',
+                  fontSize: '12px',
+                  background: isRefreshing ? 'var(--background-modifier-border)' : 'var(--background-secondary)',
+                  color: isRefreshing ? 'var(--text-muted)' : 'var(--text-normal)',
+                  border: '1px solid var(--background-modifier-border)',
+                  borderRadius: '6px',
+                  cursor: isRefreshing ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.2s ease',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  opacity: isRefreshing ? 0.6 : 1
+                }}
+                title="Refresh collections from database"
+              >
+                <span style={{ 
+                  display: 'inline-block',
+                  animation: isRefreshing ? 'spin 1s linear infinite' : 'none',
+                  transformOrigin: 'center'
+                }}>
+                  🔄
+                </span>
+              </button>
+            )}
+            <button
               onClick={() => setShowAdvanced(!showAdvanced)}
-          style={{
+              style={{
                 padding: '6px 10px',
                 fontSize: '12px',
                 background: showAdvanced ? 'var(--interactive-accent)' : 'var(--background-secondary)',
@@ -1070,17 +1120,17 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
                 padding: '6px 12px',
                 fontSize: '12px',
                 background: 'var(--interactive-accent)',
-            color: 'var(--text-on-accent)',
-            border: 'none',
+                color: 'var(--text-on-accent)',
+                border: 'none',
                 borderRadius: '6px',
                 cursor: 'pointer',
                 fontWeight: '500',
                 transition: 'all 0.2s ease'
-          }}
-          title="Create new collection"
-        >
-          + New
-        </button>
+              }}
+              title="Create new collection"
+            >
+              + New
+            </button>
           </div>
         </div>
         
@@ -1160,6 +1210,8 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
               onClick={() => setActiveCollectionId(collection.id)}
               onContextMenu={(e) => handleRightClick(e, collection.id)}
               onMouseDown={(e) => handleLeftClickPaste(e, collection.id)}
+              onMouseEnter={() => setHoveredCollectionId(collection.id)}
+              onMouseLeave={() => setHoveredCollectionId(null)}
               style={{
                 padding: '12px',
                 backgroundColor: collection.color && activeCollectionId === collection.id
@@ -1184,7 +1236,6 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
                     : '1px solid var(--background-modifier-border)',
                 borderRadius: '6px',
                 cursor: 'pointer',
-                transition: 'all 0.2s ease',
                 position: 'relative',
                 minHeight: '60px',
                 display: 'flex',
@@ -1193,7 +1244,11 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
                 opacity: isDragging && activeCollectionId === collection.id ? 0.7 : 1,
                 boxShadow: activeCollectionId === collection.id 
                   ? '0 2px 8px rgba(0,0,0,0.1)'
-                  : 'none'
+                  : hoveredCollectionId === collection.id
+                    ? '0 1px 4px rgba(0,0,0,0.1)'
+                    : 'none',
+                transform: hoveredCollectionId === collection.id ? 'translateY(-1px)' : 'none',
+                transition: 'all 0.2s ease'
               }}
               title={`${collection.label}\n${collection.itemCount} items\n\nLeft-click: Select\nRight-click: Paste clipboard\nCtrl+Click: Paste clipboard\nDrag text here: Add to collection`}
             >
@@ -1259,6 +1314,121 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
                   }}>
                     {collection.itemCount}
                   </span>
+                  {/* Quick Actions - Show on hover */}
+                  {(hoveredCollectionId === collection.id || activeCollectionId === collection.id) && (
+                    <>
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          duplicateCollection(collection.id);
+                        }}
+                        style={{
+                          background: 'var(--background-secondary)',
+                          border: '1px solid var(--background-modifier-border)',
+                          color: '#ffffff',
+                          cursor: 'pointer',
+                          padding: '4px 6px',
+                          fontSize: '11px',
+                          borderRadius: '4px',
+                          opacity: 0.9,
+                          transition: 'all 0.2s ease'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.opacity = '1';
+                          e.currentTarget.style.background = 'var(--interactive-accent)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.opacity = '0.9';
+                          e.currentTarget.style.background = 'var(--background-secondary)';
+                        }}
+                        title="Duplicate collection"
+                      >
+                        📋
+                      </button>
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          exportCollection(collection.id);
+                        }}
+                        style={{
+                          background: 'var(--background-secondary)',
+                          border: '1px solid var(--background-modifier-border)',
+                          color: '#ffffff',
+                          cursor: 'pointer',
+                          padding: '4px 6px',
+                          fontSize: '11px',
+                          borderRadius: '4px',
+                          opacity: 0.9,
+                          transition: 'all 0.2s ease'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.opacity = '1';
+                          e.currentTarget.style.background = 'var(--interactive-accent)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.opacity = '0.9';
+                          e.currentTarget.style.background = 'var(--background-secondary)';
+                        }}
+                        title="Export collection"
+                      >
+                        💾
+                      </button>
+                    </>
+                  )}
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      // Popout individual collection to a new markdown note
+                      try {
+                        if (!plugin?.app) return;
+                        const currentCollection = collections.find(c => c.id === collection.id);
+                        if (!currentCollection) return;
+                        
+                        // Create a temporary markdown file with collection content
+                        const vault = plugin.app.vault;
+                        const fileName = `Collection_${currentCollection.label.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.md`;
+                        const filePath = fileName;
+                        
+                        // Create markdown content
+                        const content = `# ${currentCollection.label}\n\n${currentCollection.content}\n\n---\n\n**Tags:** ${(currentCollection.tags || []).join(', ')}\n**Items:** ${currentCollection.itemCount}\n**Created:** ${new Date(currentCollection.createdAt).toLocaleString()}`;
+                        
+                        // Create file and open in popout
+                        const file = await vault.create(filePath, content);
+                        const leaf = plugin.app.workspace.openPopoutLeaf();
+                        await leaf.openFile(file);
+                        new Notice(`Collection "${currentCollection.label}" opened in popout window`);
+                      } catch (error: any) {
+                        new Notice(`Failed to popout collection: ${error.message}`);
+                        console.error('Collection popout error:', error);
+                      }
+                    }}
+                    style={{
+                      background: hoveredCollectionId === collection.id || activeCollectionId === collection.id 
+                        ? 'var(--background-secondary)' 
+                        : 'transparent',
+                      border: '1px solid var(--background-modifier-border)',
+                      color: '#ffffff',
+                      cursor: 'pointer',
+                      padding: '4px 6px',
+                      fontSize: '11px',
+                      borderRadius: '4px',
+                      opacity: hoveredCollectionId === collection.id || activeCollectionId === collection.id ? 0.9 : 0.5,
+                      transition: 'all 0.2s ease'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.opacity = '1';
+                      e.currentTarget.style.background = 'var(--interactive-accent)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.opacity = hoveredCollectionId === collection.id || activeCollectionId === collection.id ? '0.9' : '0.5';
+                      e.currentTarget.style.background = hoveredCollectionId === collection.id || activeCollectionId === collection.id 
+                        ? 'var(--background-secondary)' 
+                        : 'transparent';
+                    }}
+                    title="Popout this collection to a separate window"
+                  >
+                    🔲
+                  </button>
                   {showAdvanced && (
                     <button
                       onClick={(e) => {
@@ -1274,13 +1444,27 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
                         }
                       }}
                       style={{
-                        background: mergeSource === collection.id ? 'var(--aihp-accent)' : 'transparent',
-                        border: 'none',
-                        color: 'inherit',
+                        background: mergeSource === collection.id ? 'var(--interactive-accent)' : 'transparent',
+                        border: '1px solid var(--background-modifier-border)',
+                        color: '#ffffff',
                         cursor: 'pointer',
-                        padding: '2px 4px',
+                        padding: '4px 6px',
                         fontSize: '11px',
-                        opacity: 0.7
+                        borderRadius: '4px',
+                        opacity: hoveredCollectionId === collection.id || activeCollectionId === collection.id ? 0.9 : 0.5,
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => {
+                        if (mergeSource !== collection.id) {
+                          e.currentTarget.style.opacity = '1';
+                          e.currentTarget.style.background = 'var(--interactive-accent)';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (mergeSource !== collection.id) {
+                          e.currentTarget.style.opacity = hoveredCollectionId === collection.id || activeCollectionId === collection.id ? '0.9' : '0.5';
+                          e.currentTarget.style.background = 'transparent';
+                        }
                       }}
                       title={mergeSource === collection.id ? "Cancel merge" : mergeSource ? "Merge into this" : "Select to merge"}
                     >
@@ -1290,16 +1474,34 @@ export const CollectionPanel: React.FC<CollectionPanelProps> = ({ onCollectionUp
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      deleteCollection(collection.id);
+                      if (confirm(`Delete collection "${collection.label}"?`)) {
+                        deleteCollection(collection.id);
+                      }
                     }}
                     style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: 'inherit',
+                      background: hoveredCollectionId === collection.id || activeCollectionId === collection.id 
+                        ? 'var(--background-secondary)' 
+                        : 'transparent',
+                      border: '1px solid var(--background-modifier-border)',
+                      color: '#ff6b6b',
                       cursor: 'pointer',
-                      padding: '2px 4px',
+                      padding: '4px 6px',
                       fontSize: '12px',
-                      opacity: 0.7
+                      borderRadius: '4px',
+                      opacity: hoveredCollectionId === collection.id || activeCollectionId === collection.id ? 0.9 : 0.5,
+                      transition: 'all 0.2s ease'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.opacity = '1';
+                      e.currentTarget.style.background = '#ff6b6b20';
+                      e.currentTarget.style.color = '#ff4444';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.opacity = hoveredCollectionId === collection.id || activeCollectionId === collection.id ? '0.9' : '0.5';
+                      e.currentTarget.style.background = hoveredCollectionId === collection.id || activeCollectionId === collection.id 
+                        ? 'var(--background-secondary)' 
+                        : 'transparent';
+                      e.currentTarget.style.color = '#ff6b6b';
                     }}
                     title="Delete collection"
                   >

@@ -28,6 +28,40 @@ export const DEFAULT_SETTINGS: ParserSettings = {
       maxChars: 8000,
       autoAnnotate: false,
     },
+    ollamaConfig: {
+      enabled: false,
+      url: "http://127.0.0.1:11434",
+      model: "llama3.2:3b-instruct",
+      temperature: 0.7,
+      maxTokens: 4096,
+      timeout: 30000,
+      autoImprove: true,
+      confidenceThreshold: 0.8,
+      reasoningFramework: {
+        enabled: true,
+        useChainOfThought: true,
+        useTreeOfThought: true,
+        useGraphOfThought: false,
+        useUnstableDiffusion: true,
+        maxExplorationDepth: 5,
+      },
+      defaultInstructions: `You are an AI assistant specialized in interface and application development. Your role is to:
+
+1. **Confidence Evaluation**: Always evaluate your confidence (0.0-1.0) before responding
+2. **Structured Reasoning**: Use Chain-of-Thought (linear), Tree-of-Thought (branching), or Graph-of-Thought (interconnected) reasoning
+3. **Autonomous Improvement**: Identify areas where the interface, UX, or features can be improved
+4. **Novel Outliers**: Flag unusual patterns or opportunities (confidence < 80%)
+5. **Actionable Suggestions**: Provide specific, implementable improvements
+
+Focus on:
+- UI/UX improvements (usability, accessibility, visual hierarchy)
+- Performance optimizations
+- Feature enhancements
+- Bug prevention
+- Code quality and maintainability
+
+When confidence is high (≥95%), provide direct solutions. When lower (80-95%), explore alternatives. When very low (<80%), use controlled randomness to discover novel approaches.`,
+    },
     exportSettings: {
       chunkSize: 20000,
       overlap: 500,

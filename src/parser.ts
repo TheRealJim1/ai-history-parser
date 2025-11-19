@@ -488,24 +488,71 @@ export function searchMessages(
   });
 }
 
-// Highlight text with search terms
-export function highlightText(text: string, query: string, useRegex: boolean = false): string {
-  if (!query || !query.trim()) return text;
+// Highlight text with search terms and add match IDs for navigation
+export function highlightText(
+  text: string, 
+  query: string, 
+  useRegex: boolean = false,
+  matchCounter?: { current: number }
+): string {
+  if (!query || !query.trim() || !text) return text;
 
   try {
     let pattern: RegExp;
     
     if (useRegex) {
+      // For regex mode, use the query as-is
       pattern = new RegExp(`(${query})`, 'gi');
     } else {
       // Escape special regex characters for literal search
       const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      pattern = new RegExp(`(${escaped})`, 'gi');
+      
+      // For longer queries (>= 4 chars), prefer word boundary matches
+      // For shorter queries, allow partial matches
+      if (query.length >= 4) {
+        // Try word boundary first (most precise)
+        const wordBoundaryPattern = new RegExp(`(\\b${escaped}\\b)`, 'gi');
+        if (wordBoundaryPattern.test(text)) {
+          pattern = wordBoundaryPattern;
+        } else {
+          // Fall back to exact phrase match (with word boundaries on sides)
+          pattern = new RegExp(`((?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$))`, 'gi');
+        }
+      } else {
+        // For short queries, use simple case-insensitive match
+        pattern = new RegExp(`(${escaped})`, 'gi');
+      }
     }
 
-    return text.replace(pattern, '<mark>$1</mark>');
+    // Replace matches with highlighted version, adding match IDs if counter provided
+    if (matchCounter) {
+      let matchIndex = matchCounter.current;
+      const highlighted = text.replace(pattern, (match) => {
+        matchIndex++;
+        const id = `search-match-${matchIndex}`;
+        return `<mark id="${id}" data-match-index="${matchIndex}" style="background-color: rgba(255, 255, 0, 0.4); padding: 2px 0; border-radius: 2px; font-weight: 600; scroll-margin-top: 100px;">${match}</mark>`;
+      });
+      matchCounter.current = matchIndex;
+      return highlighted;
+    } else {
+      // No counter, just highlight without IDs
+      return text.replace(pattern, '<mark style="background-color: rgba(255, 255, 0, 0.4); padding: 2px 0; border-radius: 2px; font-weight: 600;">$1</mark>');
+    }
   } catch (error) {
     // If regex fails, fall back to simple string replacement
-    return text.replace(new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '<mark>$&</mark>');
+    console.warn('Highlight regex failed, using fallback:', error);
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const fallbackPattern = new RegExp(`(${escaped})`, 'gi');
+    if (matchCounter) {
+      let matchIndex = matchCounter.current;
+      const highlighted = text.replace(fallbackPattern, (match) => {
+        matchIndex++;
+        const id = `search-match-${matchIndex}`;
+        return `<mark id="${id}" data-match-index="${matchIndex}" style="background-color: rgba(255, 255, 0, 0.4); padding: 2px 0; border-radius: 2px; font-weight: 600; scroll-margin-top: 100px;">${match}</mark>`;
+      });
+      matchCounter.current = matchIndex;
+      return highlighted;
+    }
+    return text.replace(fallbackPattern, '<mark style="background-color: rgba(255, 255, 0, 0.4); padding: 2px 0; border-radius: 2px; font-weight: 600;">$1</mark>');
   }
 }

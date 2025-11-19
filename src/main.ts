@@ -39,9 +39,18 @@ export default class AIHistoryParser extends Plugin {
     this.registerView(VIEW_TYPE_REIMPORT_LOG, (leaf: WorkspaceLeaf) => new ReimportLogView(leaf));
 
     const open = async () => {
-      const leaf = this.app.workspace.getRightLeaf(false);
-      await leaf.setViewState({ type: VIEW_TYPE, active: true });
-      this.app.workspace.revealLeaf(leaf);
+      try {
+        console.log("🔄 Opening AI History Parser view...");
+        const leaf = this.app.workspace.getRightLeaf(false);
+        console.log("✅ Got right leaf");
+        await leaf.setViewState({ type: VIEW_TYPE, active: true });
+        console.log("✅ Set view state");
+        this.app.workspace.revealLeaf(leaf);
+        console.log("✅ Revealed leaf - view should be opening");
+      } catch (error: any) {
+        console.error("❌ Failed to open view:", error);
+        new Notice(`Failed to open AI History Parser: ${error.message}`);
+      }
     };
 
     const openPopout = async () => {
@@ -227,6 +236,36 @@ export default class AIHistoryParser extends Plugin {
           }
         } else {
           new Notice("⚠️ Please open the AI History Parser view first");
+        }
+      }
+    });
+
+    this.addCommand({
+      id: "aihp-cleanup-json",
+      name: "Cleanup: Remove Redundant JSON Files",
+      callback: async () => {
+        const { executePythonScript } = await import("./utils/scriptRunner");
+        const { resolveVaultPath } = await import("./settings");
+        
+        const vaultBasePath = (this.app.vault.adapter as any).basePath || '';
+        const scriptsRoot = this.settings.pythonPipeline?.scriptsRoot || vaultBasePath;
+        const cleanupScript = resolveVaultPath("cleanup_store_directory.py", scriptsRoot);
+        
+        console.log("🧹 Starting JSON cleanup...");
+        console.log("Script path:", cleanupScript);
+        
+        try {
+          await executePythonScript(
+            [this.settings.pythonPipeline?.pythonExecutable || "python", cleanupScript, "--force"],
+            "Cleaning up redundant JSON files",
+            (progress) => {
+              console.log("Cleanup progress:", progress);
+            }
+          );
+          new Notice("✅ JSON cleanup complete! Freed space from redundant store/ directory.");
+        } catch (error: any) {
+          console.error("Cleanup error:", error);
+          new Notice(`❌ Cleanup failed: ${error.message}`, 5000);
         }
       }
     });
@@ -443,6 +482,64 @@ class AHPSettingsTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
+    // Style Settings Integration
+    containerEl.createEl('h3', { text: 'Appearance & Themes' });
+    
+    new Setting(containerEl)
+      .setName('Style Settings')
+      .setDesc('Customize the appearance of AI History Parser using Style Settings plugin')
+      .addButton(button => button
+        .setButtonText('Open Style Settings')
+        .setCta()
+        .onClick(async () => {
+          // Check if Style Settings plugin is installed
+          const styleSettingsPlugin = (this.app as any).plugins.plugins['obsidian-style-settings'];
+          if (styleSettingsPlugin) {
+            // Open Style Settings
+            (this.app as any).setting.open();
+            (this.app as any).setting.openTabById('obsidian-style-settings');
+          } else {
+            // Show notice with installation instructions
+            new Notice('Style Settings plugin not found. Install it from Community Plugins to customize themes.');
+            // Open community plugins
+            (this.app as any).setting.open();
+            (this.app as any).setting.openTabById('community-plugins');
+          }
+        }));
+
+    // Built-in Themes
+    new Setting(containerEl)
+      .setName('Built-in Themes')
+      .setDesc('Quick theme presets for AI History Parser')
+      .addDropdown(dropdown => {
+        dropdown
+          .addOption('default', 'Default (Blue)')
+          .addOption('dark-blue', 'Dark Blue')
+          .addOption('purple', 'Purple')
+          .addOption('green', 'Green')
+          .addOption('orange', 'Orange')
+          .addOption('red', 'Red')
+          .addOption('cyan', 'Cyan')
+          .addOption('pink', 'Pink')
+          .setValue((this.plugin.settings as any).themePreset || 'default')
+          .onChange(async (value) => {
+            const themes: Record<string, string> = {
+              'default': '#8bd0ff',
+              'dark-blue': '#4a9eff',
+              'purple': '#a78bfa',
+              'green': '#34d399',
+              'orange': '#fb923c',
+              'red': '#f87171',
+              'cyan': '#22d3ee',
+              'pink': '#f472b6'
+            };
+            (this.plugin.settings as any).themePreset = value;
+            this.plugin.settings.accent = themes[value] || '#8bd0ff';
+            await this.plugin.saveSettings();
+            new Notice(`Theme changed to ${value}`);
+          });
+      });
+
     // Pane sizes
     new Setting(containerEl)
       .setName('Pane sizes')
@@ -614,6 +711,216 @@ class AHPSettingsTab extends PluginSettingTab {
             pp.aiAnnotation.autoAnnotate = value;
             await this.plugin.saveSettings();
           }));
+    }
+    
+    // Enhanced Ollama Configuration Section
+    containerEl.createEl('h3', { text: '🧠✨ Background AI (Ollama) Configuration' });
+    
+    if (!pp.ollamaConfig) {
+      pp.ollamaConfig = {
+        enabled: false,
+        url: "http://127.0.0.1:11434",
+        model: "llama3.2:3b-instruct",
+        temperature: 0.7,
+        maxTokens: 4096,
+        timeout: 30000,
+        autoImprove: true,
+        confidenceThreshold: 0.8,
+        reasoningFramework: {
+          enabled: true,
+          useChainOfThought: true,
+          useTreeOfThought: true,
+          useGraphOfThought: false,
+          useUnstableDiffusion: true,
+          maxExplorationDepth: 5,
+        },
+        defaultInstructions: '',
+      };
+    }
+    
+    const ollama = pp.ollamaConfig;
+    
+    new Setting(containerEl)
+      .setName('Enable Background AI')
+      .setDesc('Enable autonomous AI improvements using Reasoning Framework V3')
+      .addToggle(toggle => toggle
+        .setValue(ollama.enabled)
+        .onChange(async (value) => {
+          ollama.enabled = value;
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+    
+    if (ollama.enabled) {
+      new Setting(containerEl)
+        .setName('Ollama URL')
+        .setDesc('Base URL for Ollama API')
+        .addText(text => text
+          .setPlaceholder('http://127.0.0.1:11434')
+          .setValue(ollama.url)
+          .onChange(async (value) => {
+            ollama.url = value;
+            await this.plugin.saveSettings();
+          }));
+      
+      new Setting(containerEl)
+        .setName('Model')
+        .setDesc('Model name for reasoning tasks')
+        .addText(text => text
+          .setPlaceholder('llama3.2:3b-instruct')
+          .setValue(ollama.model)
+          .onChange(async (value) => {
+            ollama.model = value;
+            await this.plugin.saveSettings();
+          }));
+      
+      new Setting(containerEl)
+        .setName('Temperature')
+        .setDesc('Creativity/randomness (0.0-1.0)')
+        .addSlider(slider => slider
+          .setLimits(0, 1, 0.1)
+          .setValue(ollama.temperature)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            ollama.temperature = value;
+            await this.plugin.saveSettings();
+          }));
+      
+      new Setting(containerEl)
+        .setName('Max Tokens')
+        .setDesc('Maximum tokens per request')
+        .addText(text => text
+          .setPlaceholder('4096')
+          .setValue(ollama.maxTokens.toString())
+          .onChange(async (value) => {
+            const num = parseInt(value);
+            if (!isNaN(num) && num > 0) {
+              ollama.maxTokens = num;
+              await this.plugin.saveSettings();
+            }
+          }));
+      
+      new Setting(containerEl)
+        .setName('Auto-Improve')
+        .setDesc('Automatically apply improvements when confidence is high')
+        .addToggle(toggle => toggle
+          .setValue(ollama.autoImprove)
+          .onChange(async (value) => {
+            ollama.autoImprove = value;
+            await this.plugin.saveSettings();
+          }));
+      
+      new Setting(containerEl)
+        .setName('Confidence Threshold')
+        .setDesc('Minimum confidence (0.0-1.0) to auto-apply improvements')
+        .addSlider(slider => slider
+          .setLimits(0, 1, 0.05)
+          .setValue(ollama.confidenceThreshold)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            ollama.confidenceThreshold = value;
+            await this.plugin.saveSettings();
+          }));
+      
+      // Reasoning Framework Settings
+      containerEl.createEl('h4', { text: 'Reasoning Framework V3' });
+      
+      new Setting(containerEl)
+        .setName('Enable Reasoning Framework')
+        .setDesc('Use structured reasoning (CoT, ToT, GoT) for improvements')
+        .addToggle(toggle => toggle
+          .setValue(ollama.reasoningFramework.enabled)
+          .onChange(async (value) => {
+            ollama.reasoningFramework.enabled = value;
+            await this.plugin.saveSettings();
+            this.display();
+          }));
+      
+      if (ollama.reasoningFramework.enabled) {
+        new Setting(containerEl)
+          .setName('Chain-of-Thought (CoT)')
+          .setDesc('Linear reasoning progression')
+          .addToggle(toggle => toggle
+            .setValue(ollama.reasoningFramework.useChainOfThought)
+            .onChange(async (value) => {
+              ollama.reasoningFramework.useChainOfThought = value;
+              await this.plugin.saveSettings();
+            }));
+        
+        new Setting(containerEl)
+          .setName('Tree-of-Thought (ToT)')
+          .setDesc('Branching decision exploration')
+          .addToggle(toggle => toggle
+            .setValue(ollama.reasoningFramework.useTreeOfThought)
+            .onChange(async (value) => {
+              ollama.reasoningFramework.useTreeOfThought = value;
+              await this.plugin.saveSettings();
+            }));
+        
+        new Setting(containerEl)
+          .setName('Graph-of-Thought (GoT)')
+          .setDesc('Interconnected reasoning nodes')
+          .addToggle(toggle => toggle
+            .setValue(ollama.reasoningFramework.useGraphOfThought)
+            .onChange(async (value) => {
+              ollama.reasoningFramework.useGraphOfThought = value;
+              await this.plugin.saveSettings();
+            }));
+        
+        new Setting(containerEl)
+          .setName('Unstable Diffusion')
+          .setDesc('Controlled randomness for novel discovery')
+          .addToggle(toggle => toggle
+            .setValue(ollama.reasoningFramework.useUnstableDiffusion)
+            .onChange(async (value) => {
+              ollama.reasoningFramework.useUnstableDiffusion = value;
+              await this.plugin.saveSettings();
+            }));
+        
+        new Setting(containerEl)
+          .setName('Max Exploration Depth')
+          .setDesc('Maximum depth for ToT/GoT exploration')
+          .addText(text => text
+            .setPlaceholder('5')
+            .setValue(ollama.reasoningFramework.maxExplorationDepth.toString())
+            .onChange(async (value) => {
+              const num = parseInt(value);
+              if (!isNaN(num) && num > 0 && num <= 10) {
+                ollama.reasoningFramework.maxExplorationDepth = num;
+                await this.plugin.saveSettings();
+              }
+            }));
+      }
+      
+      // Default Instructions
+      containerEl.createEl('h4', { text: 'Default Instructions' });
+      const instructionsDesc = containerEl.createEl('div', {
+        cls: 'setting-item-description',
+        text: 'System instructions for interface/app development tasks. These guide the AI\'s behavior when making autonomous improvements.'
+      });
+      
+      const instructionsTextArea = containerEl.createEl('textarea', {
+        cls: 'setting-item-textarea',
+        attr: {
+          rows: '10',
+          placeholder: 'Enter default instructions for AI agent...'
+        }
+      });
+      instructionsTextArea.value = ollama.defaultInstructions || '';
+      instructionsTextArea.style.width = '100%';
+      instructionsTextArea.style.minHeight = '200px';
+      instructionsTextArea.style.fontFamily = 'monospace';
+      instructionsTextArea.style.fontSize = '12px';
+      instructionsTextArea.style.padding = '8px';
+      instructionsTextArea.style.border = '1px solid var(--background-modifier-border)';
+      instructionsTextArea.style.borderRadius = '4px';
+      instructionsTextArea.style.background = 'var(--background-primary)';
+      instructionsTextArea.style.color = 'var(--text-normal)';
+      
+      instructionsTextArea.addEventListener('change', async () => {
+        ollama.defaultInstructions = instructionsTextArea.value;
+        await this.plugin.saveSettings();
+      });
     }
     
     // Export Settings Section

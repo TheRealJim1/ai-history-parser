@@ -274,7 +274,6 @@ export const SearchWithHistory: React.FC<SearchWithHistoryProps> = ({
     <div style={{ position: 'relative', width: '100%' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
         <div style={accentWrapperStyle}>
-          <span style={{ fontSize: '18px', opacity: accentTheme ? 0.85 : 0.65 }}>🔍</span>
           <input
             ref={inputRef}
             type="text"

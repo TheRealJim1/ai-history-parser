@@ -62,6 +62,27 @@ export interface PythonPipelineSettings {
     autoAnnotate: boolean;      // Default: false
   };
   
+  // Enhanced Ollama Configuration for Background AI
+  ollamaConfig?: {
+    enabled: boolean;           // Enable background AI improvements
+    url: string;                // Ollama API URL
+    model: string;              // Model for reasoning tasks
+    temperature: number;        // 0.0-1.0, default 0.7
+    maxTokens: number;          // Max tokens per request
+    timeout: number;            // Request timeout in ms
+    autoImprove: boolean;       // Automatically improve UI/features
+    confidenceThreshold: number; // Minimum confidence (0.0-1.0) to apply changes
+    reasoningFramework: {
+      enabled: boolean;         // Enable Reasoning Framework V3
+      useChainOfThought: boolean;
+      useTreeOfThought: boolean;
+      useGraphOfThought: boolean;
+      useUnstableDiffusion: boolean; // Controlled randomness for exploration
+      maxExplorationDepth: number;   // Max depth for ToT/GoT
+    };
+    defaultInstructions: string; // Default system instructions for interface/app development
+  };
+  
   // Export Settings
   exportSettings: {
     chunkSize: number;         // Default: 20000
